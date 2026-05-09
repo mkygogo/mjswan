@@ -11,6 +11,12 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+if __name__ == "__main__" and __package__ is None:
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+    __package__ = "examples.mjlab.g1_spinkick"
+
 import mjlab.tasks  # noqa: F401 - populates the mjlab task registry
 from mjlab.tasks.registry import load_env_cfg
 

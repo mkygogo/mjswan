@@ -1,9 +1,8 @@
 import * as THREE from 'three';
 
-import { getPosition, getQuaternion } from '../scene/scene';
-import { type NpzEntry, loadNpz } from '../scene/npz';
-import type { CommandConfigEntry, CommandTerm, CommandTermContext, CommandUiConfig } from './types';
-
+import { getPosition, getQuaternion } from 'mjswan/scene';
+import { type NpzEntry, loadNpz } from 'mjswan/npz';
+import type { CommandConfigEntry, CommandTerm, CommandTermContext, CommandUiConfig } from 'mjswan/command';
 type GentleHumanoidMotionConfig = {
   name: string;
   path: string;
@@ -49,6 +48,7 @@ function readScalar(entry: NpzEntry | undefined, fallback: number): number {
   const value = entry?.data[0];
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 }
+
 
 function normalizeQuat(q: ArrayLike<number>): Float32Array {
   const w = q[0] ?? 1.0;

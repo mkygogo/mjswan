@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 import type { MjModel } from 'mujoco';
-import { ObservationBase } from './ObservationBase';
-import type { ObservationConfig } from './ObservationBase';
-import type { PolicyRunner } from '../policy/PolicyRunner';
-import { getCommandManager } from '../command';
+import { ObservationBase } from 'mjswan/observation';
+import type { ObservationConfig } from 'mjswan/observation';
+import type { PolicyRunner } from 'mjswan/types';
+import { getCommandManager } from 'mjswan/command';
 
 /**
  * Distance vector from object to goal, expressed in the robot base frame.

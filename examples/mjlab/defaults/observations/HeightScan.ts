@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 import type { MjData } from 'mujoco';
-import { ObservationBase } from './ObservationBase';
-import type { ObservationConfig } from './ObservationBase';
-import type { PolicyRunner } from '../policy/PolicyRunner';
-import { mjcToThreeCoordinate } from '../scene/coordinate';
+import { ObservationBase } from 'mjswan/observation';
+import type { ObservationConfig } from 'mjswan/observation';
+import type { PolicyRunner } from 'mjswan/types';
+import { mjcToThreeCoordinate } from 'mjswan/coordinate';
 
 type FrameType = 'body' | 'site' | 'geom';
 

@@ -1,7 +1,6 @@
-import { getCommandManager } from '../command';
-import { TrackingCommand } from '../command/TrackingCommand';
-import { TerminationBase, type TerminationConfig } from './TerminationBase';
-import type { PolicyState } from '../policy/types';
+import { getCommandManager, isTrackingSource } from 'mjswan/command';
+import { TerminationBase, type TerminationConfig } from 'mjswan/termination';
+import type { PolicyState } from 'mjswan/types';
 import { getBodyIdByName } from './utils';
 
 export class BadMotionBodyPosZOnly extends TerminationBase {
@@ -21,7 +20,7 @@ export class BadMotionBodyPosZOnly extends TerminationBase {
     const context = getCommandManager().getContext();
     const mjModel = context?.mjModel ?? null;
     const mjData = context?.mjData ?? null;
-    if (!(tracking instanceof TrackingCommand) || !tracking.isReady() || !mjModel || !mjData) {
+    if (!isTrackingSource(tracking) || !tracking.isReady() || !mjModel || !mjData) {
       return false;
     }
 

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/banner.svg" alt="mjswan" width="60%">
+  <img src="https://github.com/ttktjmt/mjswan/raw/main/assets/banner.svg" alt="mjswan" width="60%">
 </p>
 <p align="center">
   <strong><em>Real-time Interactive RL Simulation in Your Browser</em></strong>
@@ -41,8 +41,8 @@
 
 ## News
 
-- **2026-05-06**: Ported [GentleHumanoid](https://gentle-humanoid.axell.top/#/) to **mjswan**. [[Demo](https://mjswan-gentlehumanoid.pages.dev/), [X](https://x.com/Axell_wppr/status/2051878574874148953)]
-- **2026-04-08**: Featured in the [MuJoCo README](https://github.com/google-deepmind/mujoco#first-party-bindings).
+- **2026-05-06**: Adopted for the [GentleHumanoid](https://gentle-humanoid.axell.top/#/) live demo [[Demo](https://mjswan-gentlehumanoid.pages.dev/), [X](https://x.com/Axell_wppr/status/2051878574874148953)]
+- **2026-04-08**: Featured in the [MuJoCo README](https://github.com/google-deepmind/mujoco#first-party-bindings)
 
 
 ## Features

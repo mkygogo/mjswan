@@ -83,6 +83,25 @@ export interface CommandTerm {
   dispose?(): void;
 }
 
+export interface TrackingSource {
+  isReady(): boolean;
+  getAnchorBodyName(): string | null;
+  getAnchorPos(frameIndex?: number): Float32Array | null;
+  getAnchorQuat(frameIndex?: number): Float32Array | null;
+  getBodyNames(): string[];
+  getBodyPosW(frameIndex?: number): Float32Array | null;
+}
+
+export function isTrackingSource(term: unknown): term is TrackingSource {
+  return (
+    typeof term === 'object' &&
+    term !== null &&
+    'isReady' in term &&
+    'getAnchorBodyName' in term &&
+    'getBodyNames' in term
+  );
+}
+
 export type CommandTermConstructor = new (
   termName: string,
   config: CommandConfigEntry,

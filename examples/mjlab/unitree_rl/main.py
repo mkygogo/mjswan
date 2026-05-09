@@ -1,4 +1,7 @@
-"""Unitree RL mjlab demo."""
+"""Unitree RL mjlab demo.
+
+Follow the instructions in the README to run this demo.
+"""
 
 import importlib
 import pathlib

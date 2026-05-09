@@ -1,8 +1,9 @@
-import { ObservationBase } from './ObservationBase';
-import type { ObservationConfig } from './ObservationBase';
-import { getCommandManager } from '../command';
-import type { PolicyState } from '../policy/types';
-import type { PolicyRunner } from '../policy/PolicyRunner';
+import { ObservationBase } from 'mjswan/observation';
+import type { ObservationConfig } from 'mjswan/observation';
+import { normalizeQuat, quatInverse, quatMultiply, quatApplyInv, clampFutureIndices } from 'mjswan/math';
+import { getCommandManager } from 'mjswan/command';
+import type { PolicyState } from 'mjswan/types';
+import type { PolicyRunner } from 'mjswan/types';
 
 type GentleHumanoidTrackingSource = {
   refJointPos: Float32Array[];
@@ -37,55 +38,6 @@ function readSteps(config: ObservationConfig, key: string, fallback: number[]): 
   return values.map((value: number) => Math.floor(value));
 }
 
-function clampIndices(base: number, steps: number[], length: number): number[] {
-  return steps.map((step) => {
-    const idx = base + step;
-    if (idx < 0) return 0;
-    if (idx >= length) return Math.max(0, length - 1);
-    return idx;
-  });
-}
-
-function normalizeQuat(q: ArrayLike<number>): Float32Array {
-  const w = q[0] ?? 1.0;
-  const x = q[1] ?? 0.0;
-  const y = q[2] ?? 0.0;
-  const z = q[3] ?? 0.0;
-  const n = Math.hypot(w, x, y, z) || 1.0;
-  return new Float32Array([w / n, x / n, y / n, z / n]);
-}
-
-function quatInverse(q: ArrayLike<number>): Float32Array {
-  const w = q[0] ?? 1.0;
-  const x = q[1] ?? 0.0;
-  const y = q[2] ?? 0.0;
-  const z = q[3] ?? 0.0;
-  const n2 = w * w + x * x + y * y + z * z || 1.0;
-  return new Float32Array([w / n2, -x / n2, -y / n2, -z / n2]);
-}
-
-function quatMultiply(a: ArrayLike<number>, b: ArrayLike<number>): Float32Array {
-  const aw = a[0] ?? 1.0;
-  const ax = a[1] ?? 0.0;
-  const ay = a[2] ?? 0.0;
-  const az = a[3] ?? 0.0;
-  const bw = b[0] ?? 1.0;
-  const bx = b[1] ?? 0.0;
-  const by = b[2] ?? 0.0;
-  const bz = b[3] ?? 0.0;
-  return new Float32Array([
-    aw * bw - ax * bx - ay * by - az * bz,
-    aw * bx + ax * bw + ay * bz - az * by,
-    aw * by - ax * bz + ay * bw + az * bx,
-    aw * bz + ax * by - ay * bx + az * bw,
-  ]);
-}
-
-function quatApplyInv(q: ArrayLike<number>, v: ArrayLike<number>): Float32Array {
-  const pure = new Float32Array([0.0, v[0] ?? 0.0, v[1] ?? 0.0, v[2] ?? 0.0]);
-  const rotated = quatMultiply(quatMultiply(quatInverse(q), pure), q);
-  return new Float32Array([rotated[1], rotated[2], rotated[3]]);
-}
 
 function quatToRot6dColumns(q: ArrayLike<number>): number[] {
   const [w, x, y, z] = normalizeQuat(q);
@@ -195,7 +147,7 @@ export class GentleHumanoidTrackingCommandObsRaw extends ObservationBase {
     if (!tracking || !tracking.isReady()) {
       return new Float32Array(this.size);
     }
-    const indices = clampIndices(tracking.refIdx, this.futureSteps, tracking.refLen);
+    const indices = clampFutureIndices(tracking.refIdx, this.futureSteps, tracking.refLen);
     const basePos = tracking.refRootPos[indices[0]];
     const baseQuat = tracking.refRootQuat[indices[0]];
     const out: number[] = [];
@@ -247,7 +199,7 @@ export class GentleHumanoidTargetJointPosObs extends ObservationBase {
     if (!tracking || !tracking.isReady()) {
       return new Float32Array(this.size);
     }
-    const indices = clampIndices(tracking.refIdx, this.futureSteps, tracking.refLen);
+    const indices = clampFutureIndices(tracking.refIdx, this.futureSteps, tracking.refLen);
     const out = new Float32Array(this.size);
     let targetOffset = 0;
     let diffOffset = indices.length * this.nJoints;
@@ -281,7 +233,7 @@ export class GentleHumanoidTargetRootZObs extends ObservationBase {
     if (!tracking || !tracking.isReady()) {
       return new Float32Array(this.size);
     }
-    const indices = clampIndices(tracking.refIdx, this.futureSteps, tracking.refLen);
+    const indices = clampFutureIndices(tracking.refIdx, this.futureSteps, tracking.refLen);
     const out = new Float32Array(indices.length);
     for (let i = 0; i < indices.length; i++) {
       out[i] = tracking.refRootPos[indices[i]][2] ?? 0.0;
@@ -307,7 +259,7 @@ export class GentleHumanoidTargetProjectedGravityBObs extends ObservationBase {
     if (!tracking || !tracking.isReady()) {
       return new Float32Array(this.size);
     }
-    const indices = clampIndices(tracking.refIdx, this.futureSteps, tracking.refLen);
+    const indices = clampFutureIndices(tracking.refIdx, this.futureSteps, tracking.refLen);
     const out = new Float32Array(this.size);
     let offset = 0;
     for (const idx of indices) {

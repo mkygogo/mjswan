@@ -20,4 +20,6 @@ export type {
   CommandsConfig,
   CommandUiConfig,
   SliderCommandConfig,
+  TrackingSource,
 } from './types';
+export { isTrackingSource } from './types';

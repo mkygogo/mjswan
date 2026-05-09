@@ -1,5 +1,5 @@
-import { TerminationBase, type TerminationConfig } from './TerminationBase';
-import type { PolicyState } from '../policy/types';
+import { TerminationBase, type TerminationConfig } from 'mjswan/termination';
+import type { PolicyState } from 'mjswan/types';
 
 /**
  * Terminate when the robot leaves the generated terrain footprint.

@@ -14,8 +14,8 @@ if __name__ == "__main__" and __package__ is None:
     import sys
     from pathlib import Path
 
-    sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-    __package__ = "examples.mjlab"
+    sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
+    __package__ = "examples.mjlab.defaults"
 
 from . import commands  # noqa: F401 - for command registrations
 from .events import register_custom_events

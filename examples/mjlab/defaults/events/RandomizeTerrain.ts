@@ -1,4 +1,4 @@
-import { EventBase, type EventConfig, type EventContext } from './EventBase';
+import { EventBase, type EventConfig, type EventContext } from 'mjswan/event';
 
 /**
  * mjlab's randomize_terrain mutates terrain state during reset.
