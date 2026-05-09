@@ -2,9 +2,7 @@
 
 ## What mjswan is
 
-mjswan is a Python framework (v0.5.6, Apache-2.0) that packages browser-based MuJoCo simulations with real-time ONNX policy control into interactive static web apps. It is published on both PyPI and npm, and demos are hosted on GitHub Pages.
-
-Stack: Python (builder/config) + TypeScript/React/three.js/mujoco-wasm (browser client) + ONNX Runtime Web (policy inference).
+mjswan is a Python framework that packages browser-based MuJoCo simulations with real-time ONNX policy control into interactive static web apps. The Python side builds the bundle; the browser client is TypeScript/React/three.js running mujoco-wasm for physics and onnxruntime-web for policy inference. Published on PyPI and npm; demos hosted on GitHub Pages.
 
 
 ## Repository layout
@@ -18,13 +16,15 @@ src/mjswan/          Python package source
   policy.py            PolicyConfig / PolicyHandle
   motion.py            MotionConfig / MotionHandle
   splat.py             SplatConfig / SplatHandle (Gaussian Splat)
-  command.py           Command terms (Slider, Button, Checkbox, velocity_command)
+  command.py           Command terms (Slider, Button, Checkbox, velocity_command, ui_command)
   viewer_config.py     ViewerConfig
+  utils.py             ZIP-DEFLATE bundling, XML path rewriting, name2id slug helper
+  wandb_utils.py       W&B motion artifact downloads
   _cli.py              CLI entry points (main, simple, mjlab, serve)
   _build_client.py     Frontend build orchestration (npm/vite)
   adapters/            mjlab soft-dependency adapter + compat helpers
-  envs/mdp/            MDP building blocks (actions, events, obs, terminations)
-  managers/            Observation / event / action / termination managers
+  envs/mdp/            MDP building blocks (actions/ subpackage, events, observations, terminations)
+  managers/            observation_manager, event_manager, action_manager, termination_manager
   template/            TypeScript frontend (Vite + React + three.js + mujoco-wasm)
 
 examples/            Runnable examples
@@ -57,13 +57,15 @@ builder.build(output_dir) → mjswanApp
 mjswanApp.launch(host, port, open_browser)   # blocking; Colab-aware
 ```
 
-Each `*Handle` wraps a `*Config` dataclass. Handles expose a fluent API; configs hold the serializable state that `Builder.build()` turns into a static site.
+Each `*Handle` wraps a `*Config` dataclass — the handle is the fluent API, the config is the serializable state.
+
+The package's `__init__.py` is the canonical public API. Re-exports cover: `Builder` / `mjswanApp`; the five `*Handle` and `*Config` pairs; mjlab-compatible MDP cfgs (`ObservationGroupCfg`, `ObservationTermCfg`, `ActionTermCfg`, `JointPositionActionCfg`, `JointEffortActionCfg`, `TerminationTermCfg`); command UI (`SliderConfig`/`ButtonConfig`/`CheckboxConfig` and their `Slider`/`Button`/`Checkbox` aliases, `CommandTermConfig`, `ui_command`, `velocity_command`); and the `register_obs_func` / `register_event_func` / `register_termination_func` / `register_command_term` extension hooks.
 
 
 ## Key modules
 
 ### `builder.py` — `Builder`
-Main entry point. Accumulates `ProjectConfig` objects and calls `ClientBuilder` to invoke the Vite frontend build, then writes `config.json` + model/policy/motion/splat assets into the output directory as a ZIP-based static bundle.
+Main entry point. Accumulates `ProjectConfig` objects and calls `ClientBuilder` to invoke the Vite frontend build, then writes `config.json` + per-scene DEFLATE-compressed ZIPs (via `utils.to_zip_deflated`, since `mujoco.to_zip` stores entries uncompressed) plus policy/motion/splat assets into the output directory.
 
 ### `app.py` — `mjswanApp`
 Wraps a built `dist/` directory. `launch()` starts a stdlib HTTP server (COOP/COEP headers required for SharedArrayBuffer / MuJoCo WASM threading); detects Google Colab and displays an inline iframe instead.
@@ -72,7 +74,7 @@ Wraps a built `dist/` directory. `launch()` starts a stdlib HTTP server (COOP/CO
 Holds an `onnx.ModelProto` plus observation groups, action terms, termination terms, commands, and motion references. Compatible with mjlab config classes via the adapter layer. Serialized to a per-policy `<name>.json` at build time.
 
 ### `command.py`
-Defines command terms consumed by policies: `SliderConfig`, `ButtonConfig`, `CheckboxConfig`, `CommandTermConfig`, `CommandTermSpec`, `CommandUiConfig`. `velocity_command()` is a convenience factory for the standard locomotion 3-DoF velocity command. Custom command terms can be registered with `register_command_term`.
+Defines command terms consumed by policies: `SliderConfig`, `ButtonConfig`, `CheckboxConfig` (aliased as `Slider` / `Button` / `Checkbox`), `CommandTermConfig`, `CommandTermSpec`, `CommandUiConfig`, and the `CommandInput` union of input types. `velocity_command()` is a convenience factory for the standard locomotion 3-DoF velocity command, and `ui_command()` builds a generic UI-driven command term. Custom command terms can be registered with `register_command_term`.
 
 ### `scene.py` — `SceneConfig` / `SceneHandle`
 A scene owns one MuJoCo model (as `MjModel` → binary `.mjb` or `MjSpec` → XML), zero or more policies, and zero or more Gaussian splat backgrounds.
@@ -88,13 +90,16 @@ Camera parameters (lookat, distance, fovy, elevation, azimuth) + tracking mode (
 - `mjlab_compat.py`: Monkey-patches `MujocoCfg.apply_to_spec()` onto mjlab when needed.
 
 ### `envs/mdp/` and `managers/`
-mjlab-compatible MDP layer for building observation groups, action terms (joint position / effort), event functions, and termination functions. Custom obs/event/termination functions are registered via `register_obs_func` / `register_event_func` / `register_termination_func`.
+mjlab-compatible MDP layer. `envs/mdp/` holds the config-side building blocks: observation groups, action terms (`JointPositionActionCfg`, `JointEffortActionCfg`), event functions, and termination functions. `managers/` holds the runtime counterparts (`observation_manager`, `event_manager`, `action_manager`, `termination_manager`) that mjlab's training loop hands to the policy. Custom obs/event/termination functions are registered via `register_obs_func` / `register_event_func` / `register_termination_func`.
 
 ### `_build_client.py`
 Orchestrates the Node.js / Vite frontend build. Manages a local `nodeenv` if Node isn't available system-wide.
 
 ### `wandb_utils.py`
 Downloads motion `.npz` artifacts from Weights & Biases runs. Used by `PolicyHandle.add_motion_from_wandb()`.
+
+### `utils.py`
+Asset bundling and path helpers. `to_zip_deflated()` is the per-scene packager: it collects mesh/texture/hfield/skin files from disk (with `spec.assets` fallback for mjlab's prefixed-key layout), encodes buffer-only textures as PNGs, rewrites the MuJoCo XML so meshdir/texturedir hints are eliminated and all paths are ZIP-safe, and writes a DEFLATE-compressed ZIP that JSZip decodes on the client. `name2id()` is the lowercase-underscore slug helper used everywhere project / scene / policy IDs are derived from human-readable names.
 
 
 ## Frontend (`src/mjswan/template/`)
@@ -113,10 +118,10 @@ Multi-threaded mode (`Builder(mt=True)`) requires COOP/COEP headers; the builder
 
 | Command | Description |
 |---------|-------------|
-| `main`  | Run `examples/demo/main.py` |
-| `simple`| Run `examples/demo/simple.py` |
-| `mjlab` | Run `examples/mjlab/defaults/main.py` |
-| `serve <dist-dir>` | Serve a pre-built `dist/` directory |
+| `main`  | Run the demo |
+| `simple`| Run the simple demo |
+| `mjlab` | Run the mjlab defaults demo |
+| `serve <dist-dir>` | Serve a pre-built `dist/` |
 
 
 ## Tooling and workflow
@@ -129,27 +134,23 @@ Multi-threaded mode (`Builder(mt=True)`) requires COOP/COEP headers; the builder
 | `pyright` / `ty` | Type checking |
 | `pytest` | Tests (`make test`) |
 | `pre-commit` | Hooks: trailing-whitespace, ruff, pytest (not slow), eslint |
-| `eslint` | TypeScript linting (frontend) |
-| `zensical` | Docs site builder (MkDocs-based), built/served via `make docs-build` / `make docs-serve` |
+| `zensical` | Docs site builder (MkDocs-based) — `make docs-build` / `make docs-serve` |
 
 Key Makefile targets: `sync`, `format`, `type`, `check`, `test`, `test-all`, `docs-build`, `docs-serve`.
 
 
 ## Test markers
 
-- No marker — fast unit tests, always run.
-- `@pytest.mark.slow` — triggers a full frontend (npm + Vite) build; excluded from pre-commit (`pytest -m "not slow"`). Run with `make test`.
-
-CI (`pytest.yml`) runs `pytest -m "not slow"` across Python 3.10 / 3.11 / 3.12.
+`@pytest.mark.slow` triggers a full frontend (npm + Vite) build and is excluded from pre-commit (`pytest -m "not slow"`); unmarked tests are fast and always run. CI (`pytest.yml`) runs `pytest -m "not slow"` across Python 3.10 / 3.11 / 3.12.
 
 
 ## Dependencies
 
-Core: `mujoco==3.7.0`, `onnx>=1.20.0`, `nodeenv>=1.9.1`, `rich>=13.0.0`, `wandb>=0.23.1`.  
-Dev extras: `pyright`, `ruff`, `pre-commit`, `pytest`.  
+Core: `mujoco==3.7.0`, `onnx>=1.20.0`, `nodeenv>=1.9.1`, `rich>=13.0.0`, `wandb>=0.23.1`.
+Dev extras: `pyright`, `ruff`, `pre-commit`, `pytest`.
 Examples extras: `mjlab`, `torch`, `robot-descriptions`, `playground`, `myosuite`, `gymnasium`.
 
-Python 3.10–3.12 only (3.13+ excluded due to a transitive `labmaze` wheel gap).
+Python 3.10–3.12 only.
 
 
 ## Deployment
