@@ -7,6 +7,8 @@ mjswan packages browser-based MuJoCo simulations with real-time policy control i
 - **Python** ([src/mjswan/](src/mjswan/)) — `Builder` / `Project` / `Scene` API that bundles models, policies, and UI config into a static site.
 - **Frontend template** ([src/mjswan/template/](src/mjswan/template/)) — TypeScript + three.js + mujoco-wasm client that the Python build step bundles.
 
+See [CONTEXT.md](CONTEXT.md) for a full codebase map, object model, module descriptions, and tooling reference.
+
 ## Philosophy
 
 - Write clean, readable, maintainable code.
@@ -18,7 +20,7 @@ mjswan packages browser-based MuJoCo simulations with real-time policy control i
 - [src/mjswan/template/](src/mjswan/template/) — frontend source (Vite + React + three.js + mujoco-wasm).
 - [examples/](examples/) — `demo`, `mjlab`, `colab`, `tutorial` runnable examples.
 - [tests/](tests/) — pytest suite. `slow`-marked tests are opt-out (see below).
-- [docs/](docs/) — zensical site published to Read the Docs.
+- [docs/](docs/) — zensical (MkDocs-based) site published to Read the Docs. Build with `make docs-build`; serve locally with `make docs-serve`.
 
 ## Python workflow
 
