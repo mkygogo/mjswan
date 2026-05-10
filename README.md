@@ -69,9 +69,10 @@ or with `npm`:
 npm install mjswan
 ```
 
-You can run the demo using the `uv` command with the python package `mjswan[examples]`:
+You can run the bundled demo with the `mjswan` CLI (after installing `mjswan[examples]`):
 ``` sh
-uv run main
+mjswan demo          # runs the default demo
+mjswan demo --list   # see all available demos
 ```
 
 The minimum python script for a sanity check:
