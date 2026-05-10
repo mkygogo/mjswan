@@ -86,5 +86,6 @@ uv sync --all-extras
 To run the bundled demo after cloning:
 
 ```bash
-uv run main
+mjswan demo          # runs the default demo
+mjswan demo --list   # see all available demos
 ```
