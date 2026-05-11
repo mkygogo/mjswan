@@ -167,6 +167,46 @@ class TestBuilderValidation:
 
 
 # ===========================================================================
+# L1 — from_mjlab wiring (no mjlab/wandb required, dependencies monkeypatched)
+# ===========================================================================
+class TestFromMjlab:
+    """Verify Builder.from_mjlab forwards run_path to SceneHandle.add_policy_from_wandb."""
+
+    @staticmethod
+    def _patch(monkeypatch):
+        """Patch add_mjlab_scene to skip the real mjlab loader and return a mock SceneHandle."""
+        from mjswan.project import ProjectHandle
+
+        scene_handle = MagicMock(name="SceneHandle")
+        monkeypatch.setattr(
+            ProjectHandle,
+            "add_mjlab_scene",
+            lambda self, task_id, *, play=False: scene_handle,
+        )
+        return scene_handle
+
+    def test_no_run_path_does_not_call_add_policy_from_wandb(self, monkeypatch):
+        scene_handle = self._patch(monkeypatch)
+        Builder.from_mjlab("go2_flat")
+        scene_handle.add_policy_from_wandb.assert_not_called()
+
+    def test_str_run_path_forwarded_with_task_id(self, monkeypatch):
+        scene_handle = self._patch(monkeypatch)
+        Builder.from_mjlab("go2_flat", run_path="org/proj/abc")
+        scene_handle.add_policy_from_wandb.assert_called_once_with(
+            "org/proj/abc", task_id="go2_flat"
+        )
+
+    def test_list_run_path_forwarded_as_is(self, monkeypatch):
+        scene_handle = self._patch(monkeypatch)
+        run_paths = ["org/proj/a", "org/proj/b"]
+        Builder.from_mjlab("go2_flat", run_path=run_paths)
+        scene_handle.add_policy_from_wandb.assert_called_once_with(
+            run_paths, task_id="go2_flat"
+        )
+
+
+# ===========================================================================
 # L1 — _save_config_json output structure (no frontend build)
 # ===========================================================================
 class TestSaveConfigJson:

@@ -68,6 +68,7 @@ class Builder:
         cls,
         task_id: str,
         *,
+        run_path: str | list[str] | None = None,
         project_name: str = "mjlab",
         play: bool = False,
         base_path: str = "/",
@@ -83,6 +84,14 @@ class Builder:
 
         Args:
             task_id: mjlab task identifier (e.g. ``"go2_flat"``).
+            run_path: Optional W&B run path (``"entity/project/run_id"``) or a
+                list of such paths. When provided, all ``model_*.pt``
+                checkpoints from each run are fetched and converted to ONNX
+                via mjlab+torch (both required). ``task_id`` above is reused
+                for the conversion. Defaults to ``None`` (no policy attached).
+                For finer control (e.g. ``only_latest=True``, custom
+                observations/actions), drop down to
+                ``builder.get_projects()[0].scenes[0].add_policy_from_wandb(...)``.
             project_name: Name for the auto-created project. Defaults to ``"mjlab"``.
             play: Whether to load mjlab's play/evaluation config instead of the
                 training config for the auto-created scene.
@@ -98,6 +107,12 @@ class Builder:
             app = mjswan.Builder.from_mjlab("go2_flat").build()
             app.launch()
 
+            # Load mjlab scene and attach all checkpoints from a W&B run
+            app = mjswan.Builder.from_mjlab(
+                "Mjlab-Velocity-Flat-Anymal-C",
+                run_path="ttktjmt-org/mjlab/dqxvf0eb",
+            ).build()
+
             # Customise before building
             builder = mjswan.Builder.from_mjlab("go2_flat")
             scene = builder.get_projects()[0].scenes[0]  # access SceneConfig
@@ -106,7 +121,9 @@ class Builder:
         """
         builder = cls(base_path=base_path, gtm_id=gtm_id, mt=mt, debug=debug)
         project = builder.add_project(name=project_name)
-        project.add_mjlab_scene(task_id, play=play)
+        scene = project.add_mjlab_scene(task_id, play=play)
+        if run_path is not None:
+            scene.add_policy_from_wandb(run_path, task_id=task_id)
         return builder
 
     def add_project(self, name: str, *, id: str | None = None) -> ProjectHandle:
