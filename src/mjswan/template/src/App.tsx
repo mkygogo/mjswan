@@ -308,7 +308,7 @@ function AppContent() {
     isPanelVisibleFromSearch(window.location.search)
   );
   const runtimeRef = useRef<mjswanRuntime | null>(null);
-  const { showLoading, hideLoading } = useLoading();
+  const { showLoading, hideLoading, setLoadingMessage } = useLoading();
 
   const projectId = useMemo(() => getProjectIdFromLocation(), []);
   const sceneQuery = useMemo(() => {
@@ -321,7 +321,7 @@ function AppContent() {
   }, []);
 
   useEffect(() => {
-    showLoading();
+    showLoading('Loading…');
     loadConfig(import.meta.env.BASE_URL || '/', projectId)
       .then((data: AppConfig) => {
         setConfig(data);
@@ -437,6 +437,15 @@ function AppContent() {
     hideLoading();
   }, [hideLoading]);
 
+  const handleViewerStatus = useCallback((status: string) => {
+    // "Running simulation" is the done sentinel — onReady drives hideLoading.
+    // "Failed to load scene" is handled by the error HUD.
+    if (status === 'Running simulation' || status === 'Failed to load scene') {
+      return;
+    }
+    setLoadingMessage(status);
+  }, [setLoadingMessage]);
+
   // Reset splat selection when switching scenes
   useEffect(() => {
     const firstSplat = currentScene?.splats?.[0];
@@ -458,18 +467,26 @@ function AppContent() {
     return currentScene.splats.map((s) => ({ value: s.name, label: s.name }));
   }, [currentScene?.splats]);
 
-  const handleSplatChange = useCallback((value: string | null) => {
-    if (value === null) {
-      void runtimeRef.current?.setSplat(null);
-    } else {
-      const splat = resolvedSplats.find((s) => s.name === value);
-      if (splat) {
-        runtimeRef.current?.setSplat(splat);
-      }
-    }
+  const handleSplatChange = useCallback(async (value: string | null) => {
     setSelectedSplat(value);
     setCustomSplatUrl(null);
-  }, [resolvedSplats]);
+    const runtime = runtimeRef.current;
+    if (!runtime) {
+      return;
+    }
+    const splat = value === null ? null : (resolvedSplats.find((s) => s.name === value) ?? null);
+    if (value !== null && !splat) {
+      return;
+    }
+    showLoading(value === null ? 'Removing splat…' : `Loading splat "${value}"…`);
+    try {
+      await runtime.setSplat(splat);
+    } catch (e) {
+      console.error('Failed to load splat:', e);
+    } finally {
+      hideLoading();
+    }
+  }, [resolvedSplats, showLoading, hideLoading]);
 
   const handleSplatUrlLoad = useCallback(async (url: string): Promise<boolean> => {
     try {
@@ -478,10 +495,22 @@ function AppContent() {
     } catch {
       return false;
     }
-    runtimeRef.current?.setSplat({ name: 'Custom', url });
-    setCustomSplatUrl(url);
-    return true;
-  }, []);
+    const runtime = runtimeRef.current;
+    if (!runtime) {
+      return false;
+    }
+    showLoading('Loading splat "Custom"…');
+    try {
+      await runtime.setSplat({ name: 'Custom', url });
+      setCustomSplatUrl(url);
+      return true;
+    } catch (e) {
+      console.error('Failed to load custom splat:', e);
+      return false;
+    } finally {
+      hideLoading();
+    }
+  }, [showLoading, hideLoading]);
 
   const handleCalibrateSplat = useCallback((scale: number, xOffset: number, yOffset: number, zOffset: number, roll: number, pitch: number, yaw: number) => {
     const splat = resolvedSplatConfig ?? (customSplatUrl ? { name: 'Custom', url: customSplatUrl } : null);
@@ -516,9 +545,9 @@ function AppContent() {
       if (!project) {
         return;
       }
-      showLoading();
-      setCurrentProject(project);
       const nextScene = pickScene(project, null);
+      showLoading(nextScene ? `Loading scene "${nextScene.name}"…` : 'Loading…');
+      setCurrentProject(project);
       setCurrentScene(nextScene);
       const nextPolicy = nextScene ? pickPolicy(nextScene, null) : null;
       setSelectedPolicy(nextPolicy);
@@ -542,7 +571,7 @@ function AppContent() {
       if (!scene) {
         return;
       }
-      showLoading();
+      showLoading(`Loading scene "${scene.name}"…`);
       setCurrentScene(scene);
       const nextPolicy = pickPolicy(scene, null);
       setSelectedPolicy(nextPolicy);
@@ -560,7 +589,7 @@ function AppContent() {
   const handlePolicyChange = useCallback(
     (value: string | null) => {
       if (value !== selectedPolicy) {
-        showLoading();
+        showLoading(value ? `Loading policy "${value}"…` : 'Loading policy…');
       }
       setSelectedPolicy(value);
       const nextPolicyConfig = currentScene?.policies.find((policy) => policy.name === value) ?? null;
@@ -578,16 +607,25 @@ function AppContent() {
     [syncUrlState]
   );
 
-  const handleMotionChange = useCallback((value: string | null) => {
+  const handleMotionChange = useCallback(async (value: string | null) => {
     const previousMotion = selectedMotion;
     setSelectedMotion(value);
-    const result = runtimeRef.current?.setSelectedMotion(value);
-    void result?.then((accepted) => {
+    const runtime = runtimeRef.current;
+    if (!runtime) {
+      return;
+    }
+    showLoading(value === null ? 'Clearing motion…' : `Loading motion "${value}"…`);
+    try {
+      const accepted = await runtime.setSelectedMotion(value);
       if (accepted === false && value !== null) {
-        setSelectedMotion(runtimeRef.current?.getSelectedMotionName() ?? previousMotion);
+        setSelectedMotion(runtime.getSelectedMotionName() ?? previousMotion);
       }
-    });
-  }, [selectedMotion]);
+    } catch (e) {
+      console.error('Failed to load motion:', e);
+    } finally {
+      hideLoading();
+    }
+  }, [selectedMotion, showLoading, hideLoading]);
 
   const handleShowReferenceChange = useCallback((value: boolean) => {
     setShowReferenceMotion(value);
@@ -655,6 +693,7 @@ function AppContent() {
           showReferenceMotion={showReferenceMotion}
           onError={handleViewerError}
           onReady={handleViewerReady}
+          onStatusChange={handleViewerStatus}
           onRuntimeReady={handleRuntimeReady}
         />
       </div>

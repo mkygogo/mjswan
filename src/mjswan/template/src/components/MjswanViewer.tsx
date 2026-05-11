@@ -60,8 +60,8 @@ const MjswanViewer = ({
     };
 
     const init = async () => {
-      notify('Loading MuJoCo...');
       if (!mujocoRef.current) {
+        notify('Loading MuJoCo…');
         const mujocoModule = __MUJOCO_MT__
           ? await import('mujoco/mt')
           : await import('mujoco');
@@ -86,7 +86,7 @@ const MjswanViewer = ({
         onRuntimeReady?.(runtimeRef.current);
       }
 
-      notify('Loading scene assets...');
+      notify('Loading scene…');
       await runtimeRef.current.loadEnvironment(scenePath, policyConfigPath ?? null, splatConfigRef.current ?? null, cameraConfig ?? null, eventsConfig ?? null, terrainData ?? null);
       await runtimeRef.current.setSelectedMotion(selectedMotionRef.current ?? null);
       runtimeRef.current.setReferenceVisible(showReferenceRef.current);
@@ -123,13 +123,6 @@ const MjswanViewer = ({
       runtimeRef.current = null;
     };
   }, [scenePath, baseUrl, policyConfigPath, cameraConfig, eventsConfig, terrainData, onStatusChange, onError, onReady]);
-
-  useEffect(() => {
-    if (!runtimeRef.current) {
-      return;
-    }
-    void runtimeRef.current.setSelectedMotion(selectedMotion ?? null);
-  }, [selectedMotion]);
 
   useEffect(() => {
     runtimeRef.current?.setReferenceVisible(showReferenceMotion);
