@@ -29,10 +29,7 @@ def main():
         name="Box over Plane",
     )
 
-    # Build the application
     app = builder.build()
-
-    # Launch in browser
     app.launch()
 
 
