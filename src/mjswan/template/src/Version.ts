@@ -24,6 +24,10 @@ export const GITHUB_CONTRIBUTORS: Contributor[] = [
     html_url: "https://github.com/claude",
   },
   {
+    login: "Axellwppr",
+    html_url: "https://github.com/Axellwppr",
+  },
+  {
     login: "julien-blanchon",
     html_url: "https://github.com/julien-blanchon",
   },
@@ -34,10 +38,6 @@ export const GITHUB_CONTRIBUTORS: Contributor[] = [
   {
     login: "brentyi",
     html_url: "https://github.com/brentyi",
-  },
-  {
-    login: "Axellwppr",
-    html_url: "https://github.com/Axellwppr",
   },
   {
     login: "CharlieLeee",
