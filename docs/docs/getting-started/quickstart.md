@@ -62,4 +62,5 @@ You should see an interactive 3D view of a green box falling onto a red plane. C
 
 - [Core Concepts](core-concepts.md) — understand the Builder → Project → Scene → Policy hierarchy
 - [Examples](examples.md) — copy-paste patterns for policies, multiple projects, and more
+- [CLI](cli.md) — the `mjswan` command: `view`, `serve`, `new`, `demo`, `info`
 - [Deployment](../guides/deployment.md) — host your app on GitHub Pages or Netlify

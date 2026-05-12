@@ -4,9 +4,81 @@ icon: octicons/arrow-switch-16
 
 # Using mjlab
 
-[mjlab](https://github.com/mujocolab/mjlab) is a reinforcement learning framework built on top of MuJoCo. mjswan can visualize mjlab environments directly — there is no need to export or convert anything. Pass the `MjSpec` from an mjlab `Scene` straight to `add_scene()`.
+[mjlab](https://github.com/mujocolab/mjlab){:target="_blank"} is a reinforcement learning framework built on top of MuJoCo. mjswan can visualize mjlab environments directly — there is no need to export or convert anything.
 
-## Basic integration
+This page walks through three integration levels, from the one-line shortcut to the full manual form.
+
+## 1. One-liner: `Builder.from_mjlab`
+
+The fastest path. `Builder.from_mjlab(task_id, run_path=...)` creates a project, adds the mjlab scene, and (optionally) attaches every `model_*.pt` checkpoint from one or more W&B runs as ONNX policies.
+
+```python
+import mjswan
+
+# Just visualize the scene
+app = mjswan.Builder.from_mjlab("go2_flat").build()
+app.launch()
+
+# Visualize the scene + every checkpoint from a W&B run
+app = mjswan.Builder.from_mjlab(
+    "Mjlab-Velocity-Flat-Anymal-C",
+    run_path="<entity>/<project>/<run_id>",
+).build()
+app.launch()
+```
+
+The W&B form requires both `mjlab` and `torch` (the `model_*.pt` → ONNX conversion runs locally). For finer control, drop down to the next two patterns.
+
+## 2. Scene helper: `ProjectHandle.add_mjlab_scene`
+
+When you need multiple scenes (one per task) or want to mix mjlab tasks with hand-written scenes, use `add_mjlab_scene(task_id, play=...)` on a `ProjectHandle`. It loads the task's MuJoCo spec, applies the task's `viewer` / `events` / terrain data, and returns a normal `SceneHandle`.
+
+```python
+import mjswan
+from mjlab.tasks.registry import list_tasks
+
+builder = mjswan.Builder()
+project = builder.add_project(name="mjlab Tasks")
+
+for task_id in list_tasks():
+    project.add_mjlab_scene(task_id, play=True)
+
+builder.build().launch()
+```
+
+### Attaching trained policies from W&B
+
+Use `scene.add_policy_from_wandb(run_path, task_id=..., ...)` to fetch checkpoints from one or more W&B runs and attach them all to the scene. Pass `observations` / `commands` / `actions` / `terminations` from the mjlab `env_cfg` — mjswan adapts mjlab config classes automatically.
+
+```python
+import mjswan
+from mjlab.tasks.registry import load_env_cfg
+
+builder = mjswan.Builder()
+project = builder.add_project(name="ANYmal C")
+
+task_id = "Mjlab-Velocity-Flat-Anymal-C"
+env_cfg = load_env_cfg(task_id, play=True)
+
+scene = project.add_mjlab_scene(task_id, play=True)
+scene.add_policy_from_wandb(
+    "<entity>/<project>/<run_id>",
+    task_id=task_id,
+    commands=env_cfg.commands,
+    actions=env_cfg.actions,
+    terminations=env_cfg.terminations,
+)
+
+builder.build().launch()
+```
+
+`add_policy_from_wandb` accepts a `list[str]` for the run path if you want to bundle checkpoints from multiple runs together. The latest checkpoint (highest training step) is marked as the default.
+
+If you only want the exported `.onnx` artifact (skipping the `.pt → .onnx` conversion), pass `only_latest=True` — `task_id` is then optional.
+
+## 3. Full manual form
+
+For maximum control — e.g. customising `env_cfg` before building the scene — fall back to mjlab's own `Scene` class and pass `spec` to `add_scene` directly:
 
 ```python
 from mjlab.scene import Scene
@@ -17,82 +89,13 @@ builder = mjswan.Builder()
 project = builder.add_project(name="mjlab Examples")
 
 env_cfg = load_env_cfg("Mjlab-Velocity-Flat-Anymal-C")
-env_cfg.scene.num_envs = 1           # single environment for the viewer
+env_cfg.scene.num_envs = 1            # single environment for the viewer
 scene_obj = Scene(env_cfg.scene, device="cpu")
 
-scene = project.add_scene(
-    spec=scene_obj.spec,             # MjSpec from mjlab
+project.add_scene(
+    spec=scene_obj.spec,              # MjSpec from mjlab
     name="ANYmal C",
 )
-
-app = builder.build()
-app.launch()
-```
-
-## Iterating over all tasks
-
-If you want to expose every registered task as a separate scene:
-
-```python
-from mjlab.scene import Scene
-from mjlab.tasks.registry import list_tasks, load_env_cfg
-import mjswan
-
-builder = mjswan.Builder()
-project = builder.add_project(name="mjlab Tasks")
-
-for task_id in list_tasks():
-    env_cfg = load_env_cfg(task_id)
-    env_cfg.scene.num_envs = 1
-    scene_obj = Scene(env_cfg.scene, device="cpu")
-    project.add_scene(spec=scene_obj.spec, name=task_id)
-
-builder.build().launch()
-```
-
-## Adding a trained policy
-
-After training with mjlab, export your policy to ONNX and attach it alongside the scene:
-
-```python
-import onnx
-
-scene = project.add_scene(spec=scene_obj.spec, name="ANYmal C")
-
-policy = scene.add_policy(
-    policy=onnx.load("checkpoints/anymal_c.onnx"),
-    name="velocity 3000 iters",
-    config_path="checkpoints/anymal_c.json",  # observation/action config
-)
-policy.add_velocity_command(
-    lin_vel_x=(-1.0, 1.0),
-    lin_vel_y=(-1.0, 1.0),
-    ang_vel_z=(-0.5, 0.5),
-    default_lin_vel_x=0.5,
-)
-```
-
-## Using mjlab_myosuite
-
-If your mjlab environment includes MyoSuite tasks (via `mjlab_myosuite`), import it before calling `list_tasks()` to register the extra task IDs:
-
-```python
-import os
-os.environ["MUJOCO_GL"] = "disable"  # headless rendering
-
-import mjlab_myosuite  # registers MyoSuite tasks into mjlab
-from mjlab.scene import Scene
-from mjlab.tasks.registry import list_tasks, load_env_cfg
-import mjswan
-
-builder = mjswan.Builder()
-project = builder.add_project(name="mjlab + MyoSuite")
-
-for task_id in list_tasks():
-    env_cfg = load_env_cfg(task_id)
-    env_cfg.scene.num_envs = 1
-    scene_obj = Scene(env_cfg.scene, device="cpu")
-    project.add_scene(spec=scene_obj.spec, name=task_id)
 
 builder.build().launch()
 ```

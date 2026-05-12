@@ -11,6 +11,7 @@ Builder
   └── Project
         └── Scene
               ├── Policy  (optional)
+              │     └── Motion  (optional, for tracking policies)
               └── Splat   (optional)
 ```
 
@@ -133,36 +134,42 @@ A policy is an ONNX model that runs inference inside the browser. Attach one or 
 import onnx
 
 policy = scene.add_policy(
-    policy=onnx.load("locomotion.onnx"),
     name="Locomotion",
+    policy=onnx.load("locomotion.onnx"),
     config_path="locomotion.json",  # optional: observation/action config
 )
 ```
 
 Policies are purely client-side: inference runs in the browser via onnxruntime-web, so no server is needed at runtime.
 
+You can also build the observation / action / termination config entirely from Python by passing `observations=`, `actions=`, `commands=`, and `terminations=` to `add_policy()` — `config_path` becomes optional in that case. See [examples/tutorial/minimum_policy.py](https://github.com/ttktjmt/mjswan/blob/main/examples/tutorial/minimum_policy.py){:target="_blank"} for a fully-Python example.
+
 ### Commands
 
-Commands let users interact with a running policy — for example, steering a walking robot with velocity sliders. Add them to a `PolicyHandle`:
+Commands let users interact with a running policy — for example, steering a walking robot with velocity sliders. Pass a `commands=` dict to `add_policy()`:
 
 ```python
-policy.add_command(
-    name="velocity",
-    inputs=[
-        mjswan.Slider("lin_vel_x", "Forward Velocity", range=(-1.0, 1.0), default=0.5),
-        mjswan.Slider("lin_vel_y", "Lateral Velocity", range=(-0.5, 0.5), default=0.0),
-        mjswan.Slider("ang_vel_z",  "Yaw Rate",         range=(-1.0, 1.0), default=0.0),
-    ],
+scene.add_policy(
+    name="Locomotion",
+    policy=onnx.load("locomotion.onnx"),
+    commands={
+        "velocity": mjswan.ui_command([
+            mjswan.Slider("lin_vel_x", "Forward Velocity", range=(-1.0, 1.0), default=0.5),
+            mjswan.Slider("lin_vel_y", "Lateral Velocity", range=(-0.5, 0.5), default=0.0),
+            mjswan.Slider("ang_vel_z", "Yaw Rate",         range=(-1.0, 1.0), default=0.0),
+        ]),
+    },
 )
 ```
 
-For locomotion policies the convenience helper `add_velocity_command()` does the same thing with sensible defaults:
+For locomotion policies the shortcut `add_velocity_command()` builds the same standard 3-DoF velocity group:
 
 ```python
-policy.add_velocity_command(
-    lin_vel_x=(-2.0, 2.0),
-    default_lin_vel_x=0.5,
-)
+scene.add_policy(name="Locomotion", policy=onnx.load("locomotion.onnx")) \
+    .add_velocity_command(
+        lin_vel_x=(-2.0, 2.0),
+        default_lin_vel_x=0.5,
+    )
 ```
 
 Available command inputs:
@@ -170,7 +177,36 @@ Available command inputs:
 | Class | Description |
 |---|---|
 | `mjswan.Slider` | Continuous range slider. Fields: `name`, `label`, `range`, `default`, `step` |
-| `mjswan.Button` | Momentary button. Fields: `name`, `label` |
+| `mjswan.Button` | Momentary push button. Fields: `name`, `label` |
+| `mjswan.Checkbox` | Boolean toggle. Fields: `name`, `label`, `default` |
+
+### Motion
+
+Motion-tracking policies need one or more reference motions (`.npz` files) loaded alongside the ONNX model. Attach them to the `PolicyHandle`:
+
+```python
+policy = scene.add_policy(name="Tracker", policy=onnx.load("tracker.onnx"))
+
+# Local .npz bundled into dist/ at build time
+policy.add_motion(
+    name="default",
+    source="motions/walk.npz",
+    fps=50.0,
+    anchor_body_name="pelvis",
+    body_names=("pelvis",),
+    default=True,
+    loop=False,
+)
+
+# Or fetch from a W&B run
+policy.add_motion_from_wandb(
+    wandb_run_path="<entity>/<project>/<run_id>",
+    anchor_body_name="pelvis",
+    body_names=("pelvis",),
+)
+```
+
+`anchor_body_name` and `body_names` are required — they tell the browser-side tracker which bodies in the MuJoCo model correspond to the dataset. `default=True` marks the motion as the one selected on load; when multiple motions are attached the viewer shows a selector. See the API reference for the full parameter list.
 
 ## Output structure
 
@@ -179,17 +215,25 @@ Available command inputs:
 ```
 dist/
 ├── index.html
+├── logo.svg
+├── manifest.json
+├── robots.txt
 ├── assets/
 │   ├── config.json          ← project/scene/policy manifest
 │   └── …                    ← compiled JS/CSS
+├── _headers                 ← only when Builder(mt=True)
+├── coi-serviceworker.js     ← only when Builder(mt=True)
 └── <project-id>/            ← "main" for the first project
     ├── index.html
+    ├── logo.svg
+    ├── manifest.json
     └── assets/
         └── <scene-id>/
             ├── scene.mjz    ← or scene.mjb
             ├── <policy>.onnx
-            ├── <policy>.json
-            └── <splat>.spz  ← only when source= is used
+            ├── <policy>.json  ← present when config_path / commands / observations / actions / terminations are set
+            ├── <policy>_<motion>.npz   ← per motion attached to the policy
+            └── <splat>.spz    ← only when source= is used
 ```
 
 The result is a fully static site: copy `dist/` to any static host (GitHub Pages, Netlify, S3, …) and it works without a server.
@@ -200,4 +244,5 @@ The result is a fully static site: copy `dist/` to any static host (GitHub Pages
 
 | Variable | Effect |
 |---|---|
-| `MJSWAN_BASE_PATH` | Overrides `base_path` at build time (e.g. in CI pipelines) |
+| `MJSWAN_BASE_PATH` | Read by the Vite build (`vite.config.ts`) and used as the asset base. Useful in CI pipelines. |
+| `MJSWAN_NO_LAUNCH` | Convention used by the bundled example scripts (e.g. `examples/demo/main.py`) to skip `app.launch()` after building. Honor it in your own build scripts to make them CI-friendly. |

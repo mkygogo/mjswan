@@ -13,6 +13,7 @@ nav = [
     { "Quickstart" = "getting-started/quickstart.md" },
     { "Core Concepts" = "getting-started/core-concepts.md" },
     { "Examples" = "getting-started/examples.md" },
+    { "CLI" = "getting-started/cli.md" },
     { "Using mjlab" = "getting-started/mjlab.md" },
   ]},
   { "Guides" = [

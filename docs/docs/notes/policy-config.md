@@ -2,162 +2,188 @@
 icon: octicons/file-code-16
 ---
 
-# Policy Config Format
+# Building a Policy Config
 
-When you call `scene.add_policy(..., config_path="policy.json")`, mjswan reads that JSON file, merges any command definitions into it, and writes the result alongside the ONNX file in `dist/`. The browser loads this file at runtime to know how to construct observations and apply actions.
+A policy attached to a scene needs more than just an ONNX file — the browser runtime has to know which observations to feed in, how to interpret the action, what commands to expose in the UI, and when to reset the episode. mjswan exposes all of that as Python kwargs on `add_policy()`, modelled after [mjlab](https://github.com/mujocolab/mjlab){:target="_blank"}'s config classes.
 
-This page documents the JSON schema used by the bundled examples. All fields are optional from mjswan's perspective — mjswan copies the file verbatim (merging only the `commands` key). The browser-side runtime is what interprets each field.
+This page is the practical reference for those kwargs. For a runnable end-to-end policy built entirely in Python — including a hand-crafted ONNX graph — see [examples/tutorial/minimum_policy.py](https://github.com/ttktjmt/mjswan/blob/main/examples/tutorial/minimum_policy.py){:target="_blank"}.
 
-<!-- TODO: verify — the exact set of supported obs_config component names is defined in the browser runtime, not in the Python package. The fields below are derived from the bundled example configs. -->
+## Top level: `add_policy(...)`
 
-## Top-level structure
-
-```json
-{
-  "policy_joint_names": ["joint_1", "joint_2", "..."],
-  "default_joint_pos":  [0.0, 0.4, -0.8, "..."],
-  "control_type":       "joint_position",
-  "action_scale":       0.5,
-  "stiffness":          40.0,
-  "damping":            1.0,
-  "obs_config":         { "...": "..." },
-  "onnx":               { "...": "..." },
-  "commands":           { "...": "..." }
-}
+```python
+scene.add_policy(
+    name="Locomotion",
+    policy=onnx.load("locomotion.onnx"),
+    policy_joint_names=["FL_hip", "FL_thigh", "FL_calf", ...],
+    default_joint_pos=[0.1, 0.8, -1.5, ...],
+    observations={"policy": ObservationGroupCfg(terms={...})},
+    actions={"joint_pos": JointPositionActionCfg(...)},
+    commands={"velocity": mjswan.velocity_command()},
+    terminations={"time_out": TerminationTermCfg(func=term_fns.time_out)},
+)
 ```
 
-| Key | Type | Description |
-|---|---|---|
-| `policy_joint_names` | `string[]` | Ordered list of joint names the policy controls. Must match the order the ONNX model expects. |
-| `default_joint_pos` | `number[]` | Default (resting) joint positions in radians, one per entry in `policy_joint_names`. Used when `subtract_default: true` in an observation component. |
-| `control_type` | `string` | Action interpretation. `"joint_position"` is the only documented value; the output action is treated as a target joint position. |
-| `action_scale` | `number \| number[]` | Scalar or per-joint scale applied to the raw ONNX output before sending to the PD controller. |
-| `stiffness` | `number \| number[]` | PD controller position gain (Kp). Scalar applies to all joints; array sets per-joint values. |
-| `damping` | `number \| number[]` | PD controller velocity gain (Kd). Same shape rules as `stiffness`. |
-| `obs_config` | `object` | Observation groups keyed by their ONNX input tensor name. See [Observation config](#observation-config). |
-| `onnx` | `object` | ONNX runtime metadata. See [ONNX metadata](#onnx-metadata). |
-| `commands` | `object` | Injected automatically by mjswan when you call `add_command()` or `add_velocity_command()`. Do not write this key manually — it will be overwritten at build time. |
+The relevant kwargs (see the [API reference](../api/core.md#scenehandleadd_policy) for the full list):
 
-## Observation config
-
-`obs_config` maps ONNX input tensor names to arrays of observation components. Each component is an object with a `name` field and optional parameters.
-
-```json
-"obs_config": {
-  "policy": [
-    { "name": "BaseAngularVelocity" },
-    { "name": "ProjectedGravity", "joint_name": "floating_base_joint" },
-    { "name": "JointPositions", "joint_names": "isaac", "subtract_default": true, "scale": 1.0 },
-    { "name": "JointVelocities", "joint_names": "isaac", "scale": 0.05 },
-    { "name": "PreviousActions" },
-    { "name": "SimpleVelocityCommand" }
-  ]
-}
-```
-
-The key (`"policy"`, `"observation"`, `"obs"`, etc.) must match the corresponding `in_keys` entry in the `onnx.meta` block.
-
-### Observation component fields
-
-| Field | Default | Description |
-|---|---|---|
-| `name` | — | Component type. See [Component types](#component-types). |
-| `history_steps` | `1` | Number of consecutive timesteps to stack. Set to `>1` for recurrent-style inputs. |
-| `interleaved` | `false` | When `history_steps > 1`: if `true`, history is interleaved across components rather than concatenated per-component. |
-| `scale` | `1.0` | Scalar multiplied into the component output before concatenation. |
-| `subtract_default` | `false` | Subtract `default_joint_pos` from joint positions before outputting. |
-| `joint_names` | — | `"isaac"` uses the order defined in `policy_joint_names`. Other values may be robot-specific. |
-| `joint_name` | — | Single joint name, used by components that reference a specific joint (e.g. `ProjectedGravity`). |
-| `world_frame` | `false` | When `true`, express velocities in the world frame instead of the base frame. |
-
-### Component types
-
-The following component names appear in the bundled examples:
-
-| Name | Output | Notes |
-|---|---|---|
-| `BaseLinearVelocity` | 3D linear velocity of the base link | |
-| `BaseAngularVelocity` | 3D angular velocity of the base link | |
-| `ProjectedGravity` / `ProjectedGravityB` | Gravity vector projected into the base frame (3D) | Requires `joint_name` pointing to the floating base joint |
-| `JointPositions` / `JointPos` | Joint positions for `policy_joint_names` joints | |
-| `JointVelocities` | Joint velocities for `policy_joint_names` joints | |
-| `PreviousActions` / `PrevActions` | Action output from the previous timestep | |
-| `SimpleVelocityCommand` | lin_vel_x, lin_vel_y, ang_vel_z from the `velocity` command group | Requires a velocity command to be defined |
-| `ImpedanceCommand` | Full impedance command vector | Used by impedance-control policies |
-
-## ONNX metadata
-
-The `onnx` block tells the browser runtime how to call the model:
-
-```json
-"onnx": {
-  "path": "locomotion.onnx",
-  "meta": {
-    "in_keys":  ["policy"],
-    "out_keys": ["action"],
-    "in_shapes": [[[1, 45]]]
-  }
-}
-```
-
-| Key | Description |
+| Kwarg | Purpose |
 |---|---|
-| `path` | Filename of the ONNX file relative to the config file. Written automatically by mjswan at build time; you can omit this from your source JSON. |
-| `meta.in_keys` | List of ONNX input tensor names, matching the keys in `obs_config`. |
-| `meta.out_keys` | List of ONNX output tensor names. The tensor named `"action"` is used as the PD controller target. |
-| `meta.in_shapes` | Optional explicit input shapes `[[[batch, dim], ...]]`. Required when the model has multiple inputs with ambiguous shapes (e.g. recurrent policies with a hidden state). |
+| `policy_joint_names` | Ordered list of joint names the policy controls. Required for browser-side actuator mapping. |
+| `default_joint_pos` | Default pose, one entry per `policy_joint_names`. Used when `use_default_offset=True` on the action term and when an observation subtracts the default pose. |
+| `observations` | `dict[str, ObservationGroupCfg]` keyed by ONNX input tensor name (e.g. `"policy"`). |
+| `actions` | `dict[str, ActionTermCfg]` keyed by term name (e.g. `"joint_pos"`). |
+| `commands` | `dict[str, CommandTermConfig]` keyed by policy-visible command name. |
+| `terminations` | `dict[str, TerminationTermCfg]` keyed by termination name. |
+| `encoder_bias` | Optional per-joint bias; the browser writes `processed_action - encoder_bias` to the actuators (mirrors mjlab). |
+| `extras` | Arbitrary JSON payload merged verbatim into the generated policy config. |
 
-## History and recurrent policies
+## Observations
 
-For policies that take a fixed-length observation history as input (e.g. HIM-Loco style), use a group-level `history_steps` and optionally `interleaved`:
+Each ONNX input tensor maps to one `ObservationGroupCfg`. A group is an ordered dict of `ObservationTermCfg` — the runtime concatenates term outputs in declaration order.
 
-```json
-"obs_config": {
-  "obs_history": {
-    "history_steps": 6,
-    "interleaved": true,
-    "components": [
-      { "name": "SimpleVelocityCommand", "scale": [2.0, 2.0, 0.25] },
-      { "name": "BaseAngularVelocity", "scale": 0.25 },
-      { "name": "ProjectedGravity", "joint_name": "floating_base_joint" },
-      { "name": "JointPositions", "joint_names": "isaac", "subtract_default": true },
-      { "name": "JointVelocities", "joint_names": "isaac", "scale": 0.05 },
-      { "name": "PreviousActions" }
-    ]
-  }
+```python
+from mjswan.envs.mdp import observations as obs_fns
+from mjswan.managers.observation_manager import (
+    ObservationGroupCfg,
+    ObservationTermCfg,
+)
+
+obs = {
+    "policy": ObservationGroupCfg(
+        terms={
+            "base_ang_vel": ObservationTermCfg(func=obs_fns.base_ang_vel),
+            "projected_gravity": ObservationTermCfg(func=obs_fns.projected_gravity_isaac),
+            "joint_pos": ObservationTermCfg(
+                func=obs_fns.joint_positions_isaac, scale=1.0,
+            ),
+            "joint_vel": ObservationTermCfg(
+                func=obs_fns.joint_vel_rel, scale=0.05,
+            ),
+            "last_action": ObservationTermCfg(func=obs_fns.previous_actions),
+            "velocity_cmd": ObservationTermCfg(
+                func=obs_fns.generated_commands,
+                params={"command_name": "velocity"},
+            ),
+        },
+    ),
 }
 ```
 
-When `interleaved: true`, the history buffer is assembled by interleaving timesteps across all components (timestep 0 of all components, then timestep 1 of all components, …) rather than concatenating all history of each component in sequence.
+`ObservationTermCfg` fields used at runtime: `func` (a built-in sentinel below or a custom one registered via `register_obs_func`), `params` (forwarded to the browser-side class), `scale`, `clip`, `history_length`. Other mjlab fields (`noise`, `delay_*`) are accepted for config compatibility but ignored — there's no training in the browser.
 
-## Minimal example
+### Built-in observation sentinels
 
-A minimal config for a simple locomotion policy with no optional fields:
+Defined in `mjswan.envs.mdp.observations`:
 
-```json
-{
-  "policy_joint_names": ["FL_hip", "FL_thigh", "FL_calf", "FR_hip", "FR_thigh", "FR_calf",
-                         "RL_hip", "RL_thigh", "RL_calf", "RR_hip", "RR_thigh", "RR_calf"],
-  "default_joint_pos": [0.1, 0.8, -1.5, -0.1, 0.8, -1.5, 0.1, 1.0, -1.5, -0.1, 1.0, -1.5],
-  "action_scale": 0.25,
-  "stiffness": 40.0,
-  "damping": 1.0,
-  "control_type": "joint_position",
-  "obs_config": {
-    "obs": [
-      { "name": "BaseAngularVelocity" },
-      { "name": "ProjectedGravityB" },
-      { "name": "JointPositions", "joint_names": "isaac", "subtract_default": true },
-      { "name": "JointVelocities", "joint_names": "isaac" },
-      { "name": "PreviousActions" },
-      { "name": "SimpleVelocityCommand" }
-    ]
-  },
-  "onnx": {
-    "meta": {
-      "in_keys": ["obs"],
-      "out_keys": ["action"]
-    }
-  }
+| Sentinel | Runtime class | Notes |
+|---|---|---|
+| `base_lin_vel` | `BaseLinearVelocity` | Linear velocity of the base, base frame. |
+| `base_ang_vel` | `BaseAngularVelocity` | Angular velocity of the base, base frame. |
+| `projected_gravity` | `ProjectedGravityB` | Gravity in the base frame (legacy implementation). |
+| `projected_gravity_isaac` | `ProjectedGravity` | Isaac-compatible; defaults to `joint_name="floating_base_joint"`. |
+| `joint_pos_rel` | `JointPos` | Joint positions − default pose. |
+| `joint_vel_rel` | `JointVelocities` | Joint velocities − default velocities. |
+| `joint_positions_isaac` | `JointPositions` | Isaac joint ordering, default-subtracted. |
+| `last_action` | `PrevActions` | Most recent action tensor. |
+| `previous_actions` | `PreviousActions` | Isaac-compatible most-recent action tensor. |
+| `generated_commands` | `GeneratedCommands` | Requires `params={"command_name": "<name>"}`. |
+| `velocity_command_with_oscillators` | `VelocityCommandWithOscillators` | 16-dim velocity command + oscillator signals. |
+| `impedance_command` | `ImpedanceCommand` | Impedance command tensor. |
+| `joint_pos_cos_sin` | `JointPosCosSin` | `[cos(q), sin(q)]` for one joint. |
+| `motion_anchor_pos_b` | `MotionAnchorPosB` | Tracking: anchor position in the robot anchor frame. |
+| `motion_anchor_ori_b` | `MotionAnchorOriB` | Tracking: anchor orientation in the robot anchor frame. |
+| `robot_body_pos_b` | `RobotBodyPosB` | Tracking: robot body positions in the robot anchor frame. |
+| `robot_body_ori_b` | `RobotBodyOriB` | Tracking: robot body orientations in the robot anchor frame. |
+| `builtin_sensor` | `BuiltinSensor` | Raw data from a named MuJoCo sensor. |
+
+`height_scan` is exported for mjlab compatibility but raises `NotImplementedError` at build time (the browser has no ray-cast sensor).
+
+For a custom observation backed by your own TypeScript class, see `register_obs_func` in the API reference.
+
+## Actions
+
+Each entry in `actions` is a subclass of `ActionTermCfg`. Two are supported in the browser:
+
+```python
+from mjswan.envs.mdp.actions import (
+    JointPositionActionCfg,
+    JointEffortActionCfg,
+)
+
+# Joint-position control with external PD
+actions = {
+    "joint_pos": JointPositionActionCfg(
+        actuator_names=(".*",),
+        scale=0.25,
+        offset=0.0,
+        use_default_offset=True,     # action=0 commands the default pose
+        stiffness=40.0,              # kp (scalar, per-joint list, or dict by joint name)
+        damping=1.0,                 # kd
+    ),
+}
+
+# Direct torque output
+actions = {
+    "thrust": JointEffortActionCfg(
+        actuator_names=("lift",),
+    ),
 }
 ```
+
+`stiffness` and `damping` are mjswan-specific — in mjlab they live on the actuator, but the browser runtime computes PD externally for motor actuators with `biastype=none`, so we need them in the policy config. Both accept a scalar, a per-joint list (aligned with `policy_joint_names`), or a dict keyed by joint name.
+
+`JointVelocityActionCfg`, `TendonLengthActionCfg`, `TendonVelocityActionCfg`, `TendonEffortActionCfg`, and `SiteEffortActionCfg` are exported so mjlab configs import cleanly, but they raise `NotImplementedError` at build time — the browser runtime doesn't support them yet.
+
+## Commands
+
+`commands` is a dict of `CommandTermConfig` values keyed by the policy-visible name your observations reference (e.g. `params={"command_name": "velocity"}` looks up `commands["velocity"]`).
+
+```python
+commands = {
+    "velocity": mjswan.velocity_command(),           # standard 3-DoF locomotion
+    "target": mjswan.ui_command([                    # arbitrary UI inputs
+        mjswan.Slider("target_height", "Target Height (m)", range=(0.3, 1.8), default=1.0),
+    ]),
+}
+```
+
+To adapt a custom mjlab command class to a browser-side TS class, use `mjswan.register_command_term(mjlab_name, spec)` — see the [API reference](../api/core.md#register_command_term).
+
+## Terminations
+
+Same shape as observations:
+
+```python
+from mjswan.envs.mdp import terminations as term_fns
+from mjswan.managers.termination_manager import TerminationTermCfg
+
+terminations = {
+    "time_out": TerminationTermCfg(func=term_fns.time_out, time_out=True),
+    "fallen":   TerminationTermCfg(
+        func=term_fns.bad_orientation,
+        params={"limit_angle": 1.0},
+    ),
+}
+```
+
+### Supported termination sentinels
+
+| Sentinel | Runtime class | Required params |
+|---|---|---|
+| `time_out` | `TimeOut` | — |
+| `bad_orientation` | `BadOrientation` | `limit_angle` (radians) |
+| `root_height_below_minimum` | `RootHeightBelowMinimum` | `minimum_height` (metres) |
+
+Other mjlab termination sentinels are exported for config compatibility but raise `NotImplementedError` at build time. Register a custom one with `register_termination_func`.
+
+## End-to-end examples
+
+| Example | What it shows |
+|---|---|
+| [examples/tutorial/minimum_policy.py](https://github.com/ttktjmt/mjswan/blob/main/examples/tutorial/minimum_policy.py){:target="_blank"} | Smallest possible policy — a hand-built ONNX PD controller plus observations, actions, and a `ui_command`, all in one file. |
+| [examples/demo/gentle_humanoid/main.py](https://github.com/ttktjmt/mjswan/blob/main/examples/demo/gentle_humanoid/main.py){:target="_blank"} | Realistic tracking policy with `JointPositionActionCfg`, motions attached via `add_motion(...)`, and per-motion metadata. |
+
+## Legacy: passing a JSON file via `config_path=`
+
+`add_policy(config_path="policy.json")` still accepts a hand-written JSON file. mjswan reads it, merges the Python-side `commands` / `observations` / `actions` / `terminations` into it, and writes the result alongside the ONNX. Prefer the Python kwargs above for new policies — the JSON form is mostly useful when importing a config that was already produced by another tool.
+
+For the on-disk JSON schema, run `git log -- docs/docs/notes/policy-config.md` and read the version prior to this rewrite.

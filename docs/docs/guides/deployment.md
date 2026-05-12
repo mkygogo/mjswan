@@ -90,16 +90,22 @@ No `base_path` change is needed when deploying to a Netlify root domain.
 
 ## Cross-Origin Isolation headers for multi-threading
 
-MuJoCo WASM module is now compiled to work with a single thread. However, when you want to use multiple threads, MuJoCo WASM uses `SharedArrayBuffer`. In this case, browsers require two HTTP response headers to enable it:
+MuJoCo WASM is compiled in single-threaded mode by default. To use the multi-threaded build, pass `mt=True` when constructing the `Builder`:
+
+```python
+builder = mjswan.Builder(mt=True)
+```
+
+Multi-threading relies on `SharedArrayBuffer`, which requires two HTTP response headers:
 
 ```
 Cross-Origin-Opener-Policy: same-origin
 Cross-Origin-Embedder-Policy: require-corp
 ```
 
-`app.launch()` sets these automatically on the local dev server. On production hosts, you must configure them yourself.
+`app.launch()` always sets these on the local dev server. For production hosts, mjswan emits the right artifacts at build time **only when `mt=True`** — without that flag, the steps below are unnecessary.
 
-**Netlify** — add a `_headers` file inside `dist/` (or your publish directory):
+**Netlify / Cloudflare Pages / Vercel** — when `mt=True`, mjswan writes a `_headers` file inside `dist/`:
 
 ```
 /*
@@ -107,7 +113,7 @@ Cross-Origin-Embedder-Policy: require-corp
   Cross-Origin-Embedder-Policy: require-corp
 ```
 
-**GitHub Pages** — does not support custom response headers. The mjswan built-in workaround uses a service worker to inject the headers client-side. This is handled automatically by the built application and requires no extra configuration.
+**GitHub Pages** — does not support custom response headers. When `mt=True`, mjswan ships a `coi-serviceworker.js` that injects the headers client-side. This is handled automatically by the built application and requires no extra configuration.
 
 **Self-hosted / nginx** — add to your server block:
 

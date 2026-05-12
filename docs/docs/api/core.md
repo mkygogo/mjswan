@@ -11,10 +11,15 @@ This page documents every public symbol exported from the `mjswan` package.
 ## Builder
 
 ```python
-class mjswan.Builder(base_path: str = "/", gtm_id: str | None = None)
+class mjswan.Builder(
+    base_path: str = "/",
+    gtm_id: str | None = None,
+    mt: bool = False,
+    debug: bool = False,
+)
 ```
 
-Top-level builder that orchestrates projects, scenes, and policies and produces a deployable web application.
+Top-level builder that orchestrates projects, scenes, policies, and splats and produces a deployable web application.
 
 **Parameters**
 
@@ -22,6 +27,31 @@ Top-level builder that orchestrates projects, scenes, and policies and produces 
 |---|---|---|---|
 | `base_path` | `str` | `"/"` | URL prefix for subdirectory deployments. Set to e.g. `"/mjswan/"` when the site lives at `https://user.github.io/mjswan/`. |
 | `gtm_id` | `str \| None` | `None` | Google Tag Manager container ID (e.g. `"GTM-XXXXXXX"`). When provided, the GTM snippet is injected into the built HTML. |
+| `mt` | `bool` | `False` | Enable multi-threaded MuJoCo WASM. Requires Cross-Origin Isolation; mjswan emits a `_headers` file (Netlify / Cloudflare Pages / Vercel) and a `coi-serviceworker.js` (required for GitHub Pages, which cannot set response headers). |
+| `debug` | `bool` | `False` | Keep browser console messages in the built application. Defaults to stripping them from the production bundle. |
+
+### Builder.from_mjlab
+
+```python
+@classmethod
+def from_mjlab(
+    task_id: str,
+    *,
+    run_path: str | list[str] | None = None,
+    project_name: str = "mjlab",
+    play: bool = False,
+    base_path: str = "/",
+    gtm_id: str | None = None,
+    mt: bool = False,
+    debug: bool = False,
+) -> Builder
+```
+
+Convenience factory that creates a `Builder` pre-configured with a single mjlab task. The returned `Builder` already contains one project and one scene; call `build()` directly, or modify it further before building.
+
+When `run_path` is supplied, every `model_*.pt` checkpoint from each W&B run is fetched and converted to ONNX via mjlab + torch (both required). For finer control, drop down to `builder.get_projects()[0].scenes[0].add_policy_from_wandb(...)`.
+
+**Returns** — `Builder`
 
 ### Builder.add_project
 
@@ -99,6 +129,25 @@ Add a MuJoCo scene. Provide exactly one of `model` or `spec`.
 
 **Raises** — `ValueError` if both or neither of `model`/`spec` are provided.
 
+### ProjectHandle.add_mjlab_scene
+
+```python
+def add_mjlab_scene(task_id: str, *, play: bool = False) -> SceneHandle
+```
+
+Load an mjlab task's MuJoCo spec from the task registry and add it as a scene. Requires `mjlab` to be installed. Automatically applies the task's `viewer`, `events`, and any terrain data.
+
+**Parameters**
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `task_id` | `str` | — | mjlab task identifier (e.g. `"go2_flat"`). |
+| `play` | `bool` | `False` | Load mjlab's play/evaluation config instead of the training config. |
+
+**Returns** — `SceneHandle`
+
+**Raises** — `ImportError` if `mjlab` is not installed.
+
 ### ProjectHandle properties
 
 | Property | Type | Description |
@@ -110,34 +159,82 @@ Add a MuJoCo scene. Provide exactly one of `model` or `spec`.
 
 ## SceneHandle
 
-Returned by `ProjectHandle.add_scene()`. Use it to attach policies to a scene.
+Returned by `ProjectHandle.add_scene()`. Use it to attach policies, splats, viewer config, and reset events to a scene.
 
 ### SceneHandle.add_policy
 
 ```python
 def add_policy(
-    policy: onnx.ModelProto,
     name: str,
+    policy: onnx.ModelProto,
     *,
     metadata: dict[str, Any] | None = None,
     source_path: str | None = None,
     config_path: str | None = None,
+    observations: dict[str, ObservationGroupCfg] | None = None,
+    commands: Mapping[str, CommandTermConfig] | None = None,
+    actions: Mapping[str, ActionTermCfg] | None = None,
+    terminations: dict[str, TerminationTermCfg] | None = None,
+    policy_joint_names: list[str] | None = None,
+    default_joint_pos: list[float] | None = None,
+    encoder_bias: list[float] | None = None,
+    initial_qpos: list[float] | None = None,
+    initial_qvel: list[float] | None = None,
+    extras: dict[str, Any] | None = None,
+    default: bool = False,
 ) -> PolicyHandle
 ```
 
-Attach an ONNX policy to the scene.
+Attach an ONNX policy to the scene. `observations`, `commands`, `actions`, and `terminations` all accept mjlab-compatible config classes (mjswan converts them via the adapter layer; mjlab is a soft dependency).
 
 **Parameters**
 
 | Name | Type | Default | Description |
 |---|---|---|---|
-| `policy` | `onnx.ModelProto` | — | Loaded ONNX model (e.g. from `onnx.load("policy.onnx")`). |
 | `name` | `str` | — | Display name shown in the UI. |
+| `policy` | `onnx.ModelProto` | — | Loaded ONNX model (e.g. from `onnx.load("policy.onnx")`). |
 | `metadata` | `dict \| None` | `None` | Arbitrary key-value metadata. |
 | `source_path` | `str \| None` | `None` | Path to the source `.onnx` file. Written to `config.json` for reference. |
-| `config_path` | `str \| None` | `None` | Path to a JSON file containing observation/action config. The builder merges this with command definitions and writes it alongside the policy. |
+| `config_path` | `str \| None` | `None` | Path to a JSON file describing observations / actions / etc. mjswan merges any Python-side `commands`/`observations`/`actions`/`terminations` into this file. See [Policy Config Format](../notes/policy-config.md). |
+| `observations` | `dict[str, ObservationGroupCfg] \| None` | `None` | Observation groups keyed by ONNX input tensor name (e.g. `"policy"`). Accepts both mjswan and mjlab `ObservationGroupCfg` instances. |
+| `commands` | `Mapping[str, CommandTermConfig] \| None` | `None` | Command terms keyed by policy-visible name (e.g. `"velocity"`). Use `mjswan.velocity_command()` or `mjswan.ui_command([...])` to construct values. Accepts mjlab `CommandTermCfg` instances too. |
+| `actions` | `Mapping[str, ActionTermCfg] \| None` | `None` | Action term configs keyed by name (e.g. `"joint_pos"`). |
+| `terminations` | `dict[str, TerminationTermCfg] \| None` | `None` | Termination term configs keyed by name. |
+| `policy_joint_names` | `list[str] \| None` | `None` | Ordered list of joint names the policy controls. Required by the browser runtime to map outputs to actuators. |
+| `default_joint_pos` | `list[float] \| None` | `None` | Default (resting) joint positions corresponding to `policy_joint_names`. |
+| `encoder_bias` | `list[float] \| None` | `None` | Per-joint encoder bias (mirrors mjlab's joint-position action path). |
+| `initial_qpos` | `list[float] \| None` | `None` | Optional initial qpos serialized into the policy JSON for reset logic. |
+| `initial_qvel` | `list[float] \| None` | `None` | Optional initial qvel serialized into the policy JSON for reset logic. |
+| `extras` | `dict \| None` | `None` | Extra JSON payload merged verbatim into the generated policy config. |
+| `default` | `bool` | `False` | If `True`, this policy is initially selected in the viewer. |
 
 **Returns** — `PolicyHandle`
+
+### SceneHandle.add_policy_from_wandb
+
+```python
+def add_policy_from_wandb(
+    run_path: str | list[str],
+    *,
+    only_latest: bool = False,
+    task_id: str | None = None,
+    config_path: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    observations: dict[str, ObservationGroupCfg] | None = None,
+    commands: Mapping[str, Any] | None = None,
+    actions: Mapping[str, ActionTermCfg] | None = None,
+    terminations: dict[str, TerminationTermCfg] | None = None,
+    extras: dict[str, Any] | None = None,
+) -> list[PolicyHandle]
+```
+
+Fetch ONNX policies from one or more W&B runs and attach them all to the scene. Same `observations` / `commands` / `actions` / `terminations` are applied to every policy.
+
+When `only_latest=False` (the default), all `model_*.pt` checkpoints in each run are downloaded and converted to ONNX via mjlab + torch — `task_id` is required. When `only_latest=True`, only the exported `.onnx` artifact is fetched.
+
+**Returns** — `list[PolicyHandle]` (flat across all runs). The latest checkpoint (highest `_<step>` suffix) is marked as the default.
+
+**Raises** — `ValueError` if `only_latest=False` and `task_id` is missing; `ImportError` if `mjlab`/`torch` are missing.
 
 ### SceneHandle.add_splat
 
@@ -188,9 +285,29 @@ Add a Gaussian Splat background to the scene. Exactly one of `source` or `url` m
 def add_splat_section() -> SceneHandle
 ```
 
-Show the Splat selector in the control panel even when no splats are pre-configured. This lets users load a `.spz` file by pasting an external URL directly in the viewer, without requiring any `add_splat()` calls.
+Show the Splat selector in the control panel even when no splats are pre-configured. This lets users load a `.spz` file by pasting an external URL at runtime, without requiring any `add_splat()` calls.
 
 Has no effect when at least one splat is already attached (the selector is shown automatically in that case).
+
+Returns `self` for chaining.
+
+### SceneHandle.set_viewer_config
+
+```python
+def set_viewer_config(config: ViewerConfig) -> SceneHandle
+```
+
+Set the camera, tracking mode, and rendering options for the scene. See [`ViewerConfig`](#viewerconfig).
+
+Returns `self` for chaining.
+
+### SceneHandle.set_events
+
+```python
+def set_events(events: Mapping[str, Any]) -> SceneHandle
+```
+
+Set scene-level reset events. Accepts a dict of `EventTermCfg` instances (mjswan or mjlab). Only events with `mode="reset"` are forwarded to the browser runtime.
 
 Returns `self` for chaining.
 
@@ -212,24 +329,9 @@ Set a metadata entry for the scene. Returns `self` for chaining.
 
 ## PolicyHandle
 
-Returned by `SceneHandle.add_policy()`. Use it to add interactive commands.
+Returned by `SceneHandle.add_policy()`. Use it to attach commands, motions, and metadata.
 
-### PolicyHandle.add_command
-
-```python
-def add_command(name: str, inputs: list[CommandInput]) -> PolicyHandle
-```
-
-Add a command group — a named set of inputs (sliders, buttons) that the policy can read as observations.
-
-**Parameters**
-
-| Name | Type | Description |
-|---|---|---|
-| `name` | `str` | Identifier used by the observation system to retrieve values (e.g. `"velocity"`). |
-| `inputs` | `list[CommandInput]` | List of `Slider` or `Button` instances. |
-
-**Returns** — `self` for chaining.
+Note that command groups are normally passed to `add_policy(commands=...)` directly — `add_velocity_command()` below is a shortcut for the common locomotion case.
 
 ### PolicyHandle.add_velocity_command
 
@@ -241,12 +343,56 @@ def add_velocity_command(
     default_lin_vel_x: float = 0.5,
     default_lin_vel_y: float = 0.0,
     default_ang_vel_z: float = 0.0,
+    name: str = "velocity",
 ) -> PolicyHandle
 ```
 
-Convenience method: adds a `"velocity"` command group with `lin_vel_x`, `lin_vel_y`, and `ang_vel_z` sliders — the standard pattern for locomotion policies.
+Convenience method: adds a `"velocity"` command group with `lin_vel_x`, `lin_vel_y`, and `ang_vel_z` sliders — the standard pattern for locomotion policies. Equivalent to passing `commands={name: mjswan.velocity_command(...)}` to `add_policy()`.
 
 **Returns** — `self` for chaining.
+
+### PolicyHandle.add_motion
+
+```python
+def add_motion(
+    *,
+    name: str,
+    source: str,
+    fps: float = 50.0,
+    anchor_body_name: str,
+    body_names: tuple[str, ...] | list[str],
+    dataset_joint_names: list[str] | None = None,
+    default: bool = False,
+    loop: bool = True,
+) -> MotionHandle
+```
+
+Attach a bundled `.npz` reference motion to the policy (used by motion-tracking policies).
+
+**Returns** — `MotionHandle`
+
+### PolicyHandle.add_motion_from_wandb
+
+```python
+def add_motion_from_wandb(
+    *,
+    name: str | None = None,
+    wandb_run_path: str | None = None,
+    run_id: str | None = None,
+    entity: str | None = None,
+    project: str | None = None,
+    fps: float = 50.0,
+    anchor_body_name: str,
+    body_names: tuple[str, ...] | list[str],
+    dataset_joint_names: list[str] | None = None,
+    default: bool = False,
+    loop: bool = True,
+) -> MotionHandle
+```
+
+Download a motion `.npz` artifact from a W&B run and attach it to the policy. Supply either `wandb_run_path="entity/project/run_id"` or the three pieces separately.
+
+**Returns** — `MotionHandle`
 
 ### PolicyHandle.set_metadata
 
@@ -293,7 +439,84 @@ Set a metadata entry for the splat. Returns `self` for chaining.
 
 ---
 
+## MotionHandle
+
+Returned by `PolicyHandle.add_motion()` and `add_motion_from_wandb()`.
+
+### MotionHandle.set_metadata
+
+```python
+def set_metadata(key: str, value: Any) -> MotionHandle
+```
+
+Set a metadata entry for the motion. Returns `self` for chaining.
+
+### MotionHandle properties
+
+| Property | Type | Description |
+|---|---|---|
+| `name` | `str` | Display name of the motion. |
+
+---
+
+## ViewerConfig
+
+```python
+@dataclass
+class mjswan.ViewerConfig(
+    lookat: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    distance: float = 4.0,
+    fovy: float | None = None,
+    elevation: float = -30.0,
+    azimuth: float = 45.0,
+    origin_type: OriginType = OriginType.AUTO,
+    entity_name: str | None = None,
+    body_name: str | None = None,
+    env_idx: int = 0,
+    max_extra_envs: int = 2,
+    enable_reflections: bool = True,
+    enable_shadows: bool = True,
+    height: int = 240,
+    width: int = 320,
+)
+```
+
+Camera and rendering configuration applied to a scene via `SceneHandle.set_viewer_config()`. Matches the API of `mjlab.viewer.ViewerConfig`.
+
+**Selected fields**
+
+| Field | Description |
+|---|---|
+| `lookat` | Look-at point in MuJoCo coordinates (x forward, y left, z up). |
+| `distance` | Distance from the look-at point to the viewer. |
+| `elevation` | Elevation in degrees (negative = viewer above the look-at point). |
+| `azimuth` | Azimuth in degrees from the x-axis (forward), CCW. |
+| `fovy` | Vertical field of view in degrees (default 45). |
+| `origin_type` | One of `ViewerConfig.OriginType.{AUTO, WORLD, ASSET_ROOT, ASSET_BODY}`. Controls how the camera tracks the scene. |
+| `body_name` | Body to track when `origin_type` is `ASSET_BODY`. |
+| `enable_reflections` / `enable_shadows` | Toggle three.js reflections and shadows. |
+
+### ViewerConfig.from_position
+
+```python
+@staticmethod
+def from_position(
+    position: tuple[float, float, float],
+    target: tuple[float, float, float] = (0.0, 0.0, 0.0),
+    *,
+    fovy: float | None = None,
+    origin_type: ViewerConfig.OriginType | None = None,
+    body_name: str | None = None,
+) -> ViewerConfig
+```
+
+Build a `ViewerConfig` from explicit Cartesian viewer/target positions — `lookat`, `distance`, `elevation`, and `azimuth` are computed.
+
+---
+
 ## Command inputs
+
+Each entry is a leaf in a command-term UI block. The aliases (`Slider`, `Button`, `Checkbox`) are identical to their `*Config` counterparts; pick whichever reads better.
 
 ### Slider
 
@@ -304,18 +527,20 @@ mjswan.Slider(
     range: tuple[float, float] = (-1.0, 1.0),
     default: float = 0.0,
     step: float = 0.01,
+    enabled_when: str | None = None,
 )
 ```
 
-Alias for `SliderConfig`. Rendered as a range slider in the browser UI.
+Continuous range slider.
 
-| Field | Type | Description |
-|---|---|---|
-| `name` | `str` | Internal key used to look up the value in the policy observation. |
-| `label` | `str` | Human-readable label shown in the UI. |
-| `range` | `tuple[float, float]` | `(min, max)` bounds. |
-| `default` | `float` | Initial value. |
-| `step` | `float` | Slider increment (default `0.01`). |
+| Field | Description |
+|---|---|
+| `name` | Internal key used by the policy observation. |
+| `label` | Human-readable label shown in the UI. |
+| `range` | `(min, max)` bounds. |
+| `default` | Initial value. |
+| `step` | Slider increment. |
+| `enabled_when` | Optional sibling input name that enables this slider (greys it out when the named input is off). |
 
 ### Button
 
@@ -323,12 +548,71 @@ Alias for `SliderConfig`. Rendered as a range slider in the browser UI.
 mjswan.Button(name: str, label: str)
 ```
 
-Alias for `ButtonConfig`. Rendered as a momentary push button in the browser UI.
+Momentary push button. Fields: `name`, `label`.
 
-| Field | Type | Description |
-|---|---|---|
-| `name` | `str` | Internal key. |
-| `label` | `str` | Human-readable label shown in the UI. |
+### Checkbox
+
+```python
+mjswan.Checkbox(name: str, label: str, default: bool = False)
+```
+
+Boolean toggle. Fields: `name`, `label`, `default`.
+
+---
+
+## Command helpers
+
+### ui_command
+
+```python
+mjswan.ui_command(inputs: list[CommandInput]) -> CommandTermConfig
+```
+
+Build a `CommandTermConfig` whose value is driven by manual UI inputs (sliders, buttons, checkboxes). Pass the result to `add_policy(commands={...})`.
+
+```python
+target_cmd = mjswan.ui_command([
+    mjswan.Slider("target_height", "Target Height (m)", range=(0.3, 1.8), default=1.0),
+])
+scene.add_policy(name="PD", policy=model, commands={"target": target_cmd})
+```
+
+### velocity_command
+
+```python
+mjswan.velocity_command(
+    lin_vel_x: tuple[float, float] = (-1.0, 1.0),
+    lin_vel_y: tuple[float, float] = (-0.5, 0.5),
+    ang_vel_z: tuple[float, float] = (-1.0, 1.0),
+    default_lin_vel_x: float = 0.5,
+    default_lin_vel_y: float = 0.0,
+    default_ang_vel_z: float = 0.0,
+) -> CommandTermConfig
+```
+
+Build a standard `"velocity"` command group (three sliders: `lin_vel_x`, `lin_vel_y`, `ang_vel_z`). Equivalent to `PolicyHandle.add_velocity_command()` but returns the config object directly so it can be passed via `commands={...}`.
+
+### register_command_term
+
+```python
+mjswan.register_command_term(mjlab_name: str, spec: CommandTermSpec) -> None
+```
+
+Register an adapter from a custom mjlab `*CommandCfg` class to a browser-side command term. `mjlab_name` should typically be the mjlab config class name (e.g. `"LiftingCommandCfg"`).
+
+---
+
+## MDP extension registries
+
+For configs that go beyond mjlab's built-in observations / events / terminations, register custom functions with these decorators / helpers. The custom function name becomes the value of the `name` field in the serialized policy JSON.
+
+```python
+mjswan.register_obs_func(name: str, func: ObsFunc) -> None
+mjswan.register_event_func(name: str, func: EventFunc) -> None
+mjswan.register_termination_func(name: str, func: TermFunc) -> None
+```
+
+`ObsFunc`, `EventFunc`, and `TermFunc` are exported as type aliases for use in custom MDP modules.
 
 ---
 
@@ -344,10 +628,11 @@ def launch(
     host: str = "localhost",
     port: int = 8080,
     open_browser: bool = True,
+    height: int = 600,
 ) -> None
 ```
 
-Start a local HTTP server and (optionally) open the application in a browser.
+Start a local HTTP server and (optionally) open the application in a browser. When running inside Google Colab, an inline iframe is rendered instead of starting a blocking server.
 
 The server automatically sets `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp` headers — required for `SharedArrayBuffer`, which MuJoCo WASM uses for threading.
 
@@ -355,27 +640,41 @@ The server automatically sets `Cross-Origin-Opener-Policy: same-origin` and `Cro
 
 | Name | Type | Default | Description |
 |---|---|---|---|
-| `host` | `str` | `"localhost"` | Bind address. |
+| `host` | `str` | `"localhost"` | Bind address (ignored in Colab). |
 | `port` | `int` | `8080` | Port. If already in use, the next available port is chosen automatically. |
-| `open_browser` | `bool` | `True` | Open the default browser on start. |
+| `open_browser` | `bool` | `True` | Open the default browser on start (ignored in Colab). |
+| `height` | `int` | `600` | Colab iframe height in pixels (ignored outside Colab). |
 
 Blocks until interrupted with `Ctrl-C`.
 
 ---
 
-## Helper functions
+## Output structure
 
-### velocity_command
+`builder.build()` writes a fully static site:
 
-```python
-mjswan.velocity_command(
-    lin_vel_x: tuple[float, float] = (-1.0, 1.0),
-    lin_vel_y: tuple[float, float] = (-0.5, 0.5),
-    ang_vel_z: tuple[float, float] = (-1.0, 1.0),
-    default_lin_vel_x: float = 0.5,
-    default_lin_vel_y: float = 0.0,
-    default_ang_vel_z: float = 0.0,
-) -> CommandGroupConfig
+```
+dist/
+├── index.html
+├── logo.svg
+├── manifest.json
+├── robots.txt
+├── assets/
+│   ├── config.json          ← project / scene / policy / splat manifest
+│   └── …                    ← compiled JS / CSS
+├── _headers                 ← only when Builder(mt=True)
+├── coi-serviceworker.js     ← only when Builder(mt=True)
+└── <project-id>/            ← "main" for the first project
+    ├── index.html
+    ├── logo.svg
+    ├── manifest.json
+    └── assets/
+        └── <scene-id>/
+            ├── scene.mjz    ← or scene.mjb (depending on add_scene argument)
+            ├── <policy-id>.onnx
+            ├── <policy-id>.json   ← present when config_path / commands / observations / actions / terminations are set
+            ├── <policy-id>_<motion-id>.npz   ← per motion attached to the policy
+            └── <splat-id>.spz     ← only when source= is used
 ```
 
-Create a standard `"velocity"` `CommandGroupConfig` with three sliders (`lin_vel_x`, `lin_vel_y`, `ang_vel_z`). Equivalent to calling `PolicyHandle.add_velocity_command()` but returns the config object directly.
+Copy `dist/` to any static host (GitHub Pages, Netlify, S3, …) and it works without a server.

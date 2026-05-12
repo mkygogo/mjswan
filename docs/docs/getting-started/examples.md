@@ -62,8 +62,8 @@ scene = project.add_scene(
     name="G1",
 )
 scene.add_policy(
-    policy=onnx.load("robot/locomotion.onnx"),
     name="Locomotion",
+    policy=onnx.load("robot/locomotion.onnx"),
     config_path="robot/locomotion.json",
 ).add_velocity_command(
     lin_vel_x=(-1.5, 1.5),
@@ -82,14 +82,14 @@ builder.build().launch()
 scene = project.add_scene(spec=spec, name="Go2")
 
 scene.add_policy(
-    policy=onnx.load("policy_a.onnx"),
     name="Policy A",
+    policy=onnx.load("policy_a.onnx"),
     config_path="policy_a.json",
 ).add_velocity_command()
 
 scene.add_policy(
-    policy=onnx.load("policy_b.onnx"),
     name="Policy B",
+    policy=onnx.load("policy_b.onnx"),
     config_path="policy_b.json",
 ).add_velocity_command()
 ```
@@ -98,16 +98,24 @@ The browser UI shows a selector for choosing between policies at runtime.
 
 ## Custom command inputs
 
+Pass a `commands={...}` dict to `add_policy()`. Each value is a `CommandTermConfig` built with `mjswan.ui_command([...])` (manual UI) or `mjswan.velocity_command(...)` (locomotion shortcut).
+
 ```python
-policy.add_command(
-    name="velocity",
-    inputs=[
-        mjswan.Slider("lin_vel_x", "Forward",  range=(-2.0, 2.0), default=0.5, step=0.05),
-        mjswan.Slider("lin_vel_y", "Lateral",  range=(-0.5, 0.5), default=0.0, step=0.05),
-        mjswan.Slider("ang_vel_z", "Yaw Rate", range=(-1.0, 1.0), default=0.0, step=0.05),
-    ],
+scene.add_policy(
+    name="Locomotion",
+    policy=onnx.load("robot/locomotion.onnx"),
+    config_path="robot/locomotion.json",
+    commands={
+        "velocity": mjswan.ui_command([
+            mjswan.Slider("lin_vel_x", "Forward",  range=(-2.0, 2.0), default=0.5, step=0.05),
+            mjswan.Slider("lin_vel_y", "Lateral",  range=(-0.5, 0.5), default=0.0, step=0.05),
+            mjswan.Slider("ang_vel_z", "Yaw Rate", range=(-1.0, 1.0), default=0.0, step=0.05),
+        ]),
+    },
 )
 ```
+
+See [examples/tutorial/minimum_policy.py](https://github.com/ttktjmt/mjswan/blob/main/examples/tutorial/minimum_policy.py){:target="_blank"} for a full example that builds a policy plus its observation / action / command config entirely from Python — no `config_path` required.
 
 ## Multiple projects
 
