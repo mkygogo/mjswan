@@ -20,7 +20,7 @@ src/mjswan/          Python package source
   viewer_config.py     ViewerConfig
   utils.py             ZIP-DEFLATE bundling, XML path rewriting, name2id slug helper
   wandb_utils.py       W&B motion artifact downloads
-  _cli.py              CLI entry points (main, simple, mjlab, serve)
+  _cli.py              Typer-based `mjswan` CLI + legacy entry points
   _build_client.py     Frontend build orchestration (npm/vite)
   adapters/            mjlab soft-dependency adapter + compat helpers
   envs/mdp/            MDP building blocks (actions/ subpackage, events, observations, terminations)
@@ -28,10 +28,10 @@ src/mjswan/          Python package source
   template/            TypeScript frontend (Vite + React + three.js + mujoco-wasm)
 
 examples/            Runnable examples
-  demo/                main demo (deployed to GitHub Pages)
-  mjlab/               mjlab-compatible examples (G1, MyoSuite, unitree_rl, defaults)
+  demo/                main demo (deployed to GitHub Pages); includes gentle_humanoid/ and musclemimic.py
+  mjlab/               mjlab-compatible examples (defaults, g1_spinkick, myosuite, unitree_rl)
   colab/               Google Colab notebook example
-  tutorial/            hello_world quickstart
+  tutorial/            hello_world, minimum_policy, newton_cradle quickstarts
 
 tests/               pytest suite
 docs/                zensical (MkDocs-based) site — published to Read the Docs
@@ -45,6 +45,7 @@ assets/              Demo GIF and banner SVG
 
 ```
 Builder(base_path, gtm_id, mt, debug)
+  ├── Builder.from_mjlab(task_id, run_path=..., play=...) → Builder  # classmethod factory
   └── .add_project(name, id) → ProjectHandle
         └── .add_scene(name, model|spec, metadata) → SceneHandle
               ├── .add_policy(name, policy, ...) → PolicyHandle
@@ -56,6 +57,8 @@ Builder(base_path, gtm_id, mt, debug)
 builder.build(output_dir) → mjswanApp
 mjswanApp.launch(host, port, open_browser)   # blocking; Colab-aware
 ```
+
+`Builder.from_mjlab(task_id, run_path=...)` is the one-liner shortcut for the common "visualize a single mjlab task" pattern: it creates a project, adds an mjlab scene, and optionally attaches all `model_*.pt` checkpoints from one or more W&B runs (converted to ONNX via mjlab+torch). Drop down to `builder.get_projects()[0].scenes[0].add_policy_from_wandb(...)` for finer control.
 
 Each `*Handle` wraps a `*Config` dataclass — the handle is the fluent API, the config is the serializable state.
 
@@ -116,12 +119,17 @@ Multi-threaded mode (`Builder(mt=True)`) requires COOP/COEP headers; the builder
 
 ## CLI entry points
 
-| Command | Description |
-|---------|-------------|
-| `main`  | Run the demo |
-| `simple`| Run the simple demo |
-| `mjlab` | Run the mjlab defaults demo |
-| `serve <dist-dir>` | Serve a pre-built `dist/` |
+The primary CLI is `mjswan` (Typer-based, defined in `_cli.py:app`). Subcommands:
+
+| Subcommand | Description |
+|------------|-------------|
+| `mjswan view <model.xml>` | Build and launch a viewer for a MuJoCo XML/MJCF file |
+| `mjswan serve <dist-dir>` | Serve a pre-built `dist/` directory |
+| `mjswan new <name> [--template hello-world\|policy\|mjlab]` | Scaffold a new project from a template |
+| `mjswan demo [name]` / `--list` | Run a built-in demo (`simple`, `main`, `mjlab`) |
+| `mjswan info <dist-dir>` | Show a tree of projects/scenes/policies and asset sizes |
+
+Legacy entry points (kept for backward compatibility): `main`, `simple`, `mjlab`, `serve <dist-dir>` — each runs the corresponding `examples/` module.
 
 
 ## Tooling and workflow
@@ -146,9 +154,11 @@ Key Makefile targets: `sync`, `format`, `type`, `check`, `test`, `test-all`, `do
 
 ## Dependencies
 
-Core: `mujoco==3.7.0`, `onnx>=1.20.0`, `nodeenv>=1.9.1`, `rich>=13.0.0`, `wandb>=0.23.1`.
+Core: `mujoco==3.8.1`, `onnx>=1.20.0`, `nodeenv>=1.9.1`, `rich>=13.0.0`, `wandb>=0.23.1`, `typer` (for the `mjswan` CLI).
 Dev extras: `pyright`, `ruff`, `pre-commit`, `pytest`.
 Examples extras: `mjlab`, `torch`, `robot-descriptions`, `playground`, `myosuite`, `gymnasium`.
+
+mjlab itself pulls in `mujoco-mjx==3.8.1` and `mujoco-warp>=3.8.0.3` (3.8.0.3 switched from `mjENBL_MULTICCD` to a `DisableBit`, restoring compat with stable mujoco 3.8.1).
 
 Python 3.10–3.12 only.
 

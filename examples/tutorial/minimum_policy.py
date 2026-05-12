@@ -82,7 +82,7 @@ def build_spec() -> mujoco.MjSpec:
 
 
 def main():
-    builder = mjswan.Builder(debug=True)
+    builder = mjswan.Builder()
     project = builder.add_project(name="Minimum Policy")
 
     target_cmd = mjswan.ui_command(
