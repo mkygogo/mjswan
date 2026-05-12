@@ -261,34 +261,6 @@ function ControlPanel(props: ControlPanelProps) {
     };
   }, []);
 
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (
-        event.defaultPrevented ||
-        event.repeat ||
-        event.altKey ||
-        event.ctrlKey ||
-        event.metaKey ||
-        event.key.toLowerCase() !== 'c'
-      ) {
-        return;
-      }
-
-      const target = event.target instanceof Element ? event.target : document.activeElement;
-      if (isEditableElement(target)) {
-        return;
-      }
-
-      event.preventDefault();
-      onVisibleChange(!visible);
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => {
-      window.removeEventListener('keydown', handleKeyDown);
-    };
-  }, [visible, onVisibleChange]);
-
   // Handle slider value changes
   const handleSliderChange = useCallback((id: string, value: number) => {
     const commandManager = getCommandManager();
@@ -304,6 +276,42 @@ function ControlPanel(props: ControlPanelProps) {
       onReset();
     }
   }, [onReset]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (
+        event.defaultPrevented ||
+        event.repeat ||
+        event.altKey ||
+        event.ctrlKey ||
+        event.metaKey
+      ) {
+        return;
+      }
+
+      const key = event.key.toLowerCase();
+      if (key !== 'c' && key !== 'r') {
+        return;
+      }
+
+      const target = event.target instanceof Element ? event.target : document.activeElement;
+      if (isEditableElement(target)) {
+        return;
+      }
+
+      event.preventDefault();
+      if (key === 'c') {
+        onVisibleChange(!visible);
+      } else {
+        handleReset();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [visible, onVisibleChange, handleReset]);
 
   const getValueCommandsForGroup = (groupName: string): CommandDefinition[] => {
     return commands.filter(
