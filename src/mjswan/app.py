@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .frame_bridge import maybe_start_frame_bridge
+
 
 def _detect_colab() -> bool:
     try:
@@ -70,6 +72,7 @@ class mjswanApp:
                 super().end_headers()
 
         handler = CrossOriginIsolatedHandler
+        frame_bridge = maybe_start_frame_bridge()
 
         def _find_available_port(
             bind_host: str, start_port: int, max_tries: int = 1000
@@ -128,6 +131,9 @@ class mjswanApp:
                 httpd.serve_forever()
         except KeyboardInterrupt:
             print("\nServer stopped.")
+        finally:
+            if frame_bridge is not None:
+                frame_bridge.stop()
 
 
 __all__ = ["mjswanApp"]

@@ -13,7 +13,7 @@ import { loadCollider, disposeCollider } from '../scene/collider';
 import { DragStateManager } from '../utils/dragStateManager';
 import { createTendonState, updateTendonGeometry, updateTendonRendering } from '../scene/tendons';
 import { updateHeadlightFromCamera, updateLightsFromData } from '../scene/lights';
-import { threeToMjcCoordinate } from '../scene/coordinate';
+import { mjcToThreeCoordinate, threeToMjcCoordinate } from '../scene/coordinate';
 import {
   type ViewerConfig,
   type ViewerState,
@@ -37,6 +37,7 @@ import { getCommandManager, type CommandTermContext, type CommandsConfig } from 
 import { EventManager } from '../event/EventManager';
 import { Events } from '../event/events';
 import type { TerrainData } from '../event/EventBase';
+import { MujocoFrameBridgeClient, type StereoFrameBridgeMeta } from './mujoco_frame_bridge';
 
 type RuntimeOptions = {
   baseUrl?: string;
@@ -84,6 +85,19 @@ function isWasmOom(error: unknown): boolean {
 type BodyState = {
   position: THREE.Vector3;
   quaternion: THREE.Quaternion;
+};
+
+type ClickNavigationTarget = {
+  mjcX: number;
+  mjcY: number;
+  threePosition: THREE.Vector3;
+};
+
+type StereoCameraVisualization = {
+  group: THREE.Group;
+  mount: THREE.Mesh;
+  left: THREE.Mesh;
+  right: THREE.Mesh;
 };
 
 export class mjswanRuntime {
@@ -147,6 +161,17 @@ export class mjswanRuntime {
   private splatMesh: SplatMesh | null;
   private colliderMesh: THREE.Group | null;
   private cameraState: ViewerState;
+  private clickNavTarget: ClickNavigationTarget | null;
+  private clickNavMarker: THREE.Group | null;
+  private clickNavRaycaster: THREE.Raycaster;
+  private clickNavPointerDown: { x: number; y: number; time: number; button: number } | null;
+  private frameBridge: MujocoFrameBridgeClient | null;
+  private stereoLookYaw: number;
+  private stereoLookPitch: number;
+  private navState: 'idle' | 'moving' | 'arrived';
+  private navArrivedUntil: number;
+  private simStepCount: number;
+  private stereoCameraViz: StereoCameraVisualization | null;
 
   constructor(mujoco: MainModule, container: HTMLElement, options: RuntimeOptions = {}) {
     this.mujoco = mujoco;
@@ -250,11 +275,35 @@ export class mjswanRuntime {
     this.splatMesh = null;
     this.colliderMesh = null;
     this.cameraState = { trackBodyId: null, prevBodyPos: null };
+    this.clickNavTarget = null;
+    this.clickNavMarker = null;
+    this.clickNavRaycaster = new THREE.Raycaster();
+    this.clickNavPointerDown = null;
+    this.stereoLookYaw = 0;
+    this.stereoLookPitch = 0;
+    this.navState = 'idle';
+    this.navArrivedUntil = 0;
+    this.simStepCount = 0;
+    this.stereoCameraViz = null;
 
     // Initialize cache system (singleton shared across runtime instances)
     this.sceneCacheManager = SceneCacheManager.getInstance(this.mujoco);
     this.resourceTracker = new SceneResourceTracker();
     this.memoryMonitor = new MemoryMonitor();
+
+    this.container.addEventListener('pointerdown', this.onClickNavPointerDown, true);
+    this.container.addEventListener('pointerup', this.onClickNavPointerUp, true);
+
+    this.frameBridge = new MujocoFrameBridgeClient({
+      scene: this.scene,
+      renderer: this.renderer,
+      getRootObject: () => this.getStereoRootObject(),
+      getMeta: () => this.getFrameBridgeMeta(),
+      onNavGoal: (x, y, z) => this.setNavigationTargetMjc(x, y, z),
+      onNavCancel: () => this.cancelNavigation(),
+      onCamLook: (yaw, pitch) => this.setStereoCameraLook(yaw, pitch),
+      getCameraLook: () => ({ yaw: this.stereoLookYaw, pitch: this.stereoLookPitch }),
+    });
   }
 
   async loadEnvironment(
@@ -586,6 +635,7 @@ export class mjswanRuntime {
         // Commands are updated after the physics step to match mjlab training-time semantics:
         // the policy sees command values from the previous step, consistent with how mjlab
         // computes observations before stepping the environment.
+        this.updateClickNavigationCommand();
         getCommandManager().update(target);
         getCommandManager().updateDebugVisuals();
       }
@@ -993,6 +1043,9 @@ export class mjswanRuntime {
       this.onnxInputDict = this.onnxModule.initInput();
     }
     this.onnxTimeStep = 0;
+    this.simStepCount = 0;
+    this.navState = 'idle';
+    this.navArrivedUntil = 0;
     this.mujoco.mj_forward(this.mjModel, this.mjData);
     this.lastSimState.bodies.clear();
     this.updateCachedState();
@@ -1008,6 +1061,7 @@ export class mjswanRuntime {
     for (let substep = 0; substep < this.decimation; substep++) {
       this.applyPolicyControl();
       this.mujoco.mj_step(this.mjModel, this.mjData);
+      this.simStepCount += 1;
     }
   }
 
@@ -1240,6 +1294,321 @@ export class mjswanRuntime {
     this.cameraState = applyViewerConfig(config, this.camera, this.controls, this.mjModel, this.mjData);
   }
 
+  private onClickNavPointerDown = (event: PointerEvent): void => {
+    if (event.button !== 0) {
+      return;
+    }
+    this.clickNavPointerDown = {
+      x: event.clientX,
+      y: event.clientY,
+      time: performance.now(),
+      button: event.button,
+    };
+  };
+
+  private onClickNavPointerUp = (event: PointerEvent): void => {
+    const down = this.clickNavPointerDown;
+    this.clickNavPointerDown = null;
+    if (!down || down.button !== 0 || event.button !== 0) {
+      return;
+    }
+    const dx = event.clientX - down.x;
+    const dy = event.clientY - down.y;
+    const moved = Math.hypot(dx, dy);
+    const elapsed = performance.now() - down.time;
+    if (moved > 6 || elapsed > 750 || !this.hasPlanarVelocityCommand()) {
+      return;
+    }
+
+    const target = this.pickNavigationTarget(event.clientX, event.clientY);
+    if (!target) {
+      return;
+    }
+    this.clickNavTarget = target;
+    this.navState = 'moving';
+    this.navArrivedUntil = 0;
+    this.showClickNavigationMarker(target.threePosition);
+  };
+
+  private hasPlanarVelocityCommand(): boolean {
+    const commandManager = getCommandManager();
+    return (
+      Boolean(commandManager.getCommandById('velocity:lin_vel_x')) &&
+      Boolean(commandManager.getCommandById('velocity:lin_vel_y')) &&
+      Boolean(commandManager.getCommandById('velocity:ang_vel_z'))
+    );
+  }
+
+  private pickNavigationTarget(clientX: number, clientY: number): ClickNavigationTarget | null {
+    const rect = this.renderer.domElement.getBoundingClientRect();
+    const ndc = new THREE.Vector2(
+      ((clientX - rect.left) / rect.width) * 2 - 1,
+      -((clientY - rect.top) / rect.height) * 2 + 1
+    );
+    this.clickNavRaycaster.setFromCamera(ndc, this.camera);
+
+    const sceneHit = this.clickNavRaycaster.intersectObjects(this.scene.children, true)
+      .find(hit => !this.isNavigationIgnoredObject(hit.object));
+    if (sceneHit && this.isDynamicBodyObject(sceneHit.object)) {
+      return null;
+    }
+
+    const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+    const threePosition = new THREE.Vector3();
+    if (!this.clickNavRaycaster.ray.intersectPlane(groundPlane, threePosition)) {
+      return null;
+    }
+    if (!Number.isFinite(threePosition.x) || !Number.isFinite(threePosition.z)) {
+      return null;
+    }
+
+    const mjcTarget = threeToMjcCoordinate(threePosition);
+    return {
+      mjcX: mjcTarget.x,
+      mjcY: mjcTarget.y,
+      threePosition: threePosition.clone(),
+    };
+  }
+
+  private isNavigationIgnoredObject(object: THREE.Object3D): boolean {
+    let current: THREE.Object3D | null = object;
+    while (current) {
+      if (current.userData?.ignoreClickNavigation === true) {
+        return true;
+      }
+      current = current.parent;
+    }
+    return false;
+  }
+
+  private isDynamicBodyObject(object: THREE.Object3D): boolean {
+    let current: THREE.Object3D | null = object;
+    while (current) {
+      if ('bodyID' in current && typeof current.bodyID === 'number') {
+        return this.dynamicBodyIds?.has(current.bodyID) ?? current.bodyID > 0;
+      }
+      current = current.parent;
+    }
+    return false;
+  }
+
+  private showClickNavigationMarker(position: THREE.Vector3): void {
+    if (!this.clickNavMarker) {
+      const ring = new THREE.Mesh(
+        new THREE.RingGeometry(0.12, 0.18, 40),
+        new THREE.MeshBasicMaterial({
+          color: 0x31d0aa,
+          transparent: true,
+          opacity: 0.9,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+        })
+      );
+      ring.rotation.x = -Math.PI / 2;
+      const center = new THREE.Mesh(
+        new THREE.CircleGeometry(0.035, 24),
+        new THREE.MeshBasicMaterial({
+          color: 0xffffff,
+          transparent: true,
+          opacity: 0.85,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+        })
+      );
+      center.rotation.x = -Math.PI / 2;
+      this.clickNavMarker = new THREE.Group();
+      this.clickNavMarker.name = 'Click Navigation Target';
+      this.clickNavMarker.userData.ignoreDragForce = true;
+      this.clickNavMarker.userData.ignoreClickNavigation = true;
+      this.clickNavMarker.add(ring, center);
+      this.scene.add(this.clickNavMarker);
+    }
+    this.clickNavMarker.position.copy(position);
+    this.clickNavMarker.position.y += 0.01;
+    this.clickNavMarker.visible = true;
+  }
+
+
+
+  private ensureStereoCameraVisualization(): StereoCameraVisualization {
+    if (this.stereoCameraViz) {
+      return this.stereoCameraViz;
+    }
+    const group = new THREE.Group();
+    group.name = 'Virtual Stereo Camera';
+    group.userData.ignoreClickNavigation = true;
+    group.userData.ignoreDragForce = true;
+
+    const mount = new THREE.Mesh(
+      new THREE.BoxGeometry(0.024, 0.026, 0.135),
+      new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.72, metalness: 0.18 })
+    );
+    mount.name = 'Stereo Camera Bar';
+
+    const lensMaterial = new THREE.MeshStandardMaterial({ color: 0x020202, roughness: 0.42, metalness: 0.32 });
+    const left = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.018, 0.026, 32), lensMaterial.clone());
+    left.name = 'cam_left';
+    left.rotation.z = -Math.PI / 2;
+    left.position.set(0.02, 0, -0.050);
+
+    const right = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.018, 0.026, 32), lensMaterial.clone());
+    right.name = 'cam_right';
+    right.rotation.z = -Math.PI / 2;
+    right.position.set(0.02, 0, 0.050);
+
+    group.add(mount, left, right);
+    this.scene.add(group);
+    this.stereoCameraViz = { group, mount, left, right };
+    return this.stereoCameraViz;
+  }
+
+  private updateStereoCameraVisualization(): void {
+    const root = this.getStereoRootObject();
+    if (!root) {
+      if (this.stereoCameraViz) {
+        this.stereoCameraViz.group.visible = false;
+      }
+      return;
+    }
+    const viz = this.ensureStereoCameraVisualization();
+    viz.group.visible = true;
+
+    const rootPosition = new THREE.Vector3();
+    root.getWorldPosition(rootPosition);
+
+    const yaw = this.getRootYaw() + Math.min(Math.PI, Math.max(-Math.PI, this.stereoLookYaw));
+    const mountWorld = mjcToThreeCoordinate([
+      (this.mjData?.qpos[0] ?? 0) + Math.cos(yaw) * 0.02,
+      (this.mjData?.qpos[1] ?? 0) + Math.sin(yaw) * 0.02,
+      rootPosition.y + 0.05,
+    ]);
+
+    viz.group.position.copy(mountWorld);
+    viz.group.quaternion.setFromEuler(new THREE.Euler(0, -yaw, 0));
+  }
+
+  private setNavigationTargetMjc(x: number, y: number, z = 0): void {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+      console.warn('[mjswan-frame] invalid nav_goal', { x, y, z });
+      return;
+    }
+    if (!this.hasPlanarVelocityCommand()) {
+      console.warn('[mjswan-frame] nav_goal ignored: velocity command terms are missing');
+      return;
+    }
+    console.info('[mjswan-frame] nav_goal accepted', { x, y, z });
+    const threePosition = mjcToThreeCoordinate([x, y, Number.isFinite(z) ? z : 0]);
+    this.clickNavTarget = {
+      mjcX: x,
+      mjcY: y,
+      threePosition,
+    };
+    this.navState = 'moving';
+    this.navArrivedUntil = 0;
+    this.showClickNavigationMarker(threePosition);
+  }
+
+  private cancelNavigation(): void {
+    const commandManager = getCommandManager();
+    commandManager.setValue('velocity:lin_vel_x', 0.0);
+    commandManager.setValue('velocity:lin_vel_y', 0.0);
+    commandManager.setValue('velocity:ang_vel_z', 0.0);
+    this.clickNavTarget = null;
+    this.navState = 'idle';
+    this.navArrivedUntil = 0;
+    if (this.clickNavMarker) {
+      this.clickNavMarker.visible = false;
+    }
+  }
+
+  private setStereoCameraLook(yaw: number, pitch: number): void {
+    this.stereoLookYaw = Math.min(Math.PI, Math.max(-Math.PI, yaw));
+    this.stereoLookPitch = Math.min(0.8, Math.max(-0.8, pitch));
+    console.info('[mjswan-frame] cam_look accepted', { yaw: this.stereoLookYaw, pitch: this.stereoLookPitch });
+  }
+
+  private getStereoRootObject(): THREE.Object3D | null {
+    if (!this.mjModel || !this.bodies) {
+      return null;
+    }
+    const preferredNames = ['torso_link', 'base_link', 'pelvis', 'trunk'];
+    for (let bodyId = 0; bodyId < this.mjModel.nbody; bodyId++) {
+      const name = this.mjModel.body(bodyId).name;
+      if (preferredNames.includes(name) && this.bodies[bodyId]) {
+        return this.bodies[bodyId];
+      }
+    }
+    return this.bodies[1] ?? this.bodies[0] ?? null;
+  }
+
+  private getFrameBridgeMeta(): StereoFrameBridgeMeta | null {
+    if (!this.mjData) {
+      return null;
+    }
+    if (this.navState === 'arrived' && this.navArrivedUntil > 0 && performance.now() > this.navArrivedUntil) {
+      this.navState = 'idle';
+      this.navArrivedUntil = 0;
+    }
+    return {
+      x: this.mjData.qpos[0] ?? 0,
+      y: this.mjData.qpos[1] ?? 0,
+      z: this.mjData.qpos[2] ?? 0,
+      yaw: this.getRootYaw(),
+      nav_state: this.navState,
+      step: this.simStepCount,
+    };
+  }
+
+  private updateClickNavigationCommand(): void {
+    if (!this.clickNavTarget || !this.mjData) {
+      return;
+    }
+
+    const rootX = this.mjData.qpos[0] ?? 0;
+    const rootY = this.mjData.qpos[1] ?? 0;
+    const dx = this.clickNavTarget.mjcX - rootX;
+    const dy = this.clickNavTarget.mjcY - rootY;
+    const distance = Math.hypot(dx, dy);
+    const commandManager = getCommandManager();
+
+    if (distance < 0.22) {
+      commandManager.setValue('velocity:lin_vel_x', 0.0);
+      commandManager.setValue('velocity:lin_vel_y', 0.0);
+      commandManager.setValue('velocity:ang_vel_z', 0.0);
+      this.clickNavTarget = null;
+      this.navState = 'arrived';
+      this.navArrivedUntil = performance.now() + 1000;
+      if (this.clickNavMarker) {
+        this.clickNavMarker.visible = false;
+      }
+      return;
+    }
+
+    const yaw = this.getRootYaw();
+    const cosYaw = Math.cos(yaw);
+    const sinYaw = Math.sin(yaw);
+    const bodyX = cosYaw * dx + sinYaw * dy;
+    const bodyY = -sinYaw * dx + cosYaw * dy;
+    const targetYaw = Math.atan2(dy, dx);
+    const yawError = Math.atan2(Math.sin(targetYaw - yaw), Math.cos(targetYaw - yaw));
+    const slowDown = Math.min(1.0, Math.max(0.25, distance / 1.2));
+
+    commandManager.setValue('velocity:lin_vel_x', bodyX * 0.9 * slowDown);
+    commandManager.setValue('velocity:lin_vel_y', bodyY * 0.9 * slowDown);
+    commandManager.setValue('velocity:ang_vel_z', yawError * 1.8);
+  }
+
+  private getRootYaw(): number {
+    if (!this.mjData) {
+      return 0.0;
+    }
+    const w = this.mjData.qpos[3] ?? 1;
+    const x = this.mjData.qpos[4] ?? 0;
+    const y = this.mjData.qpos[5] ?? 0;
+    const z = this.mjData.qpos[6] ?? 0;
+    return Math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z));
+  }
+
   private computeDynamicBodyIds(mjModel: MjModel): Set<number> {
     const dynamic = new Set<number>();
     for (let bodyId = 1; bodyId < mjModel.nbody; bodyId++) {
@@ -1305,6 +1674,7 @@ export class mjswanRuntime {
       }
     }
 
+    this.updateStereoCameraVisualization();
     this.renderer.render(this.scene, this.camera);
   };
 
@@ -1317,9 +1687,13 @@ export class mjswanRuntime {
 
   dispose(): void {
     this.stop();
+    this.frameBridge?.dispose();
+    this.frameBridge = null;
     this.policyRunner = null;
     this.policyStateBuilder = null;
     this.policyConfigPath = null;
+    this.container.removeEventListener('pointerdown', this.onClickNavPointerDown, true);
+    this.container.removeEventListener('pointerup', this.onClickNavPointerUp, true);
 
     if (this.dragStateManager) {
       this.dragStateManager.dispose();
@@ -1352,6 +1726,46 @@ export class mjswanRuntime {
     if (this.vrButton?.parentElement) {
       this.vrButton.parentElement.removeChild(this.vrButton);
       this.vrButton = null;
+    }
+
+    if (this.stereoCameraViz?.group.parent) {
+      this.stereoCameraViz.group.parent.remove(this.stereoCameraViz.group);
+    }
+    if (this.stereoCameraViz) {
+      this.stereoCameraViz.group.traverse((object) => {
+        if ('geometry' in object && object.geometry) {
+          (object.geometry as THREE.BufferGeometry).dispose();
+        }
+        if ('material' in object && object.material) {
+          const material = object.material as THREE.Material | THREE.Material[];
+          if (Array.isArray(material)) {
+            material.forEach((entry) => entry.dispose());
+          } else {
+            material.dispose();
+          }
+        }
+      });
+      this.stereoCameraViz = null;
+    }
+
+    if (this.clickNavMarker?.parent) {
+      this.clickNavMarker.parent.remove(this.clickNavMarker);
+    }
+    if (this.clickNavMarker) {
+      this.clickNavMarker.traverse((object) => {
+        if ('geometry' in object && object.geometry) {
+          (object.geometry as THREE.BufferGeometry).dispose();
+        }
+        if ('material' in object && object.material) {
+          const material = object.material as THREE.Material | THREE.Material[];
+          if (Array.isArray(material)) {
+            material.forEach((entry) => entry.dispose());
+          } else {
+            material.dispose();
+          }
+        }
+      });
+      this.clickNavMarker = null;
     }
 
     this.bodies = null;
