@@ -89,3 +89,29 @@ Keep this FFS-mediated control path for the minimal integration. A future optimi
 - Open the mjswan page and confirm `9877` has an established browser connection.
 - Start FFS with `--camera mujoco --mujoco-port 9876` and confirm frames are read.
 
+## Full-stack one-click launch
+
+`start_all.sh` launches the complete teleoperation simulation pipeline in dependency order:
+
+```bash
+./start_all.sh              # launch all services
+./start_all.sh --rebuild    # rebuild mjswan frontend first
+./start_all.sh --stop       # stop all background services
+```
+
+Services started (in order):
+
+| Service | Port | Description |
+|---------|------|-------------|
+| Scene Relay | 8190 | StereoSpatial scene-relay.mjs |
+| Splat Server | 8091 | Gaussian splat static file server (`scripts/serve_splats.py`) |
+| mjswan | 8080 + 9876/9877 | MuJoCo simulation + frame bridge |
+| FFS | 8765 | Fast-FoundationStereo perception service |
+| StereoSpatial UI | 5174 | SpatialCanvas Vite dev server |
+
+All ports and paths are configurable via environment variables (see script header).
+
+### Splat server
+
+`scripts/serve_splats.py` serves Gaussian splat assets from `~/CloudTwin_Splat/public` on port 8091 with CORS headers. The demo G1 scene loads splats via URL from this server when configured.
+

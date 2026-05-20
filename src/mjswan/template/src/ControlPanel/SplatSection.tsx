@@ -176,17 +176,17 @@ export function SplatSection({ scale: initialScale, xOffset: initialXOffset, yOf
       <Box pb="0.5em" px="xs" style={{ display: 'flex', alignItems: 'center', gap: '0.5em' }}>
         <Text c="dimmed" style={SECTION_LABEL_STYLE}>Scale</Text>
         <Box style={{ flex: 1 }}>
-          <Slider value={scale} onChange={(val) => { setScale(val); call(val, xOffset, yOffset, zOffset, roll, pitch, yaw); }} min={0.1} max={5.0} step={0.05} size="xs" label={(val) => val.toFixed(2)} styles={SLIDER_STYLES} />
+          <Slider value={scale} onChange={(val) => { setScale(val); call(val, xOffset, yOffset, zOffset, roll, pitch, yaw); }} min={0.001} max={20.0} step={0.01} size="xs" label={(val) => val.toFixed(3)} styles={SLIDER_STYLES} />
         </Box>
       </Box>
       <VectorRow
-        label="Position" x={xOffset} y={yOffset} z={zOffset} step={0.05}
+        label="Position" x={xOffset} y={yOffset} z={zOffset} step={0.1}
         onX={(val) => { setXOffset(val); call(scale, val, yOffset, zOffset, roll, pitch, yaw); }}
         onY={(val) => { setYOffset(val); call(scale, xOffset, val, zOffset, roll, pitch, yaw); }}
         onZ={(val) => { setZOffset(val); call(scale, xOffset, yOffset, val, roll, pitch, yaw); }}
       />
       <VectorRow
-        label="Rotation" x={roll} y={pitch} z={yaw} step={0.5}
+        label="Rotation" x={roll} y={pitch} z={yaw} step={1.0}
         xLabel="R" yLabel="P" zLabel="Y"
         onX={(val) => { setRoll(val);  call(scale, xOffset, yOffset, zOffset, val, pitch, yaw); }}
         onY={(val) => { setPitch(val); call(scale, xOffset, yOffset, zOffset, roll, val, yaw); }}

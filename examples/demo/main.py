@@ -186,6 +186,134 @@ _G1_JOINT_DAMPING = {
 # fmt: on
 
 
+def _env_float(name: str, default: float) -> float:
+    value = os.environ.get(name)
+    if value is None or value.strip() == "":
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        print(f"[mjswan] Ignoring invalid {name}={value!r}; using {default}")
+        return default
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None or value.strip() == "":
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _splat_name_from_url(url: str) -> str:
+    name = url.rstrip("/").rsplit("/", 1)[-1]
+    for suffix in (".ply", ".spz", ".splat", ".ksplat"):
+        if name.lower().endswith(suffix):
+            return name[: -len(suffix)]
+    return name or "CloudTwin"
+
+
+def _splat_transform_for_name(name: str) -> dict[str, float]:
+    presets = {
+        # Center the public CloudTwin samples around the robot and put the
+        # reconstruction's dominant height close to MuJoCo z=0. These are
+        # only visual alignment defaults; the splat is not a physics collider.
+        "sciart": {"scale": 0.08, "x": 33.46, "y": -63.96, "z": 44.67},
+        "train": {"scale": 0.08, "x": 0.11, "y": 0.84, "z": -1.35},
+        "building": {"scale": 0.08, "x": 0.0, "y": 0.0, "z": 0.0},
+        "indoor_3dgs_compressed": {"scale": 1.0, "x": 0.0, "y": 0.0, "z": 0.0},
+    }
+    return presets.get(name.lower(), {"scale": 1.0, "x": 0.0, "y": 0.0, "z": 0.0})
+
+
+def _iter_env_splat_urls() -> list[tuple[str, str]]:
+    """Return external splats configured through env vars.
+
+    MJSWAN_EXTRA_SPLAT_URL keeps the previous single-file behavior.
+    MJSWAN_EXTRA_SPLAT_URLS accepts a comma-separated list.
+    MJSWAN_EXTRA_SPLAT_BASE_URL auto-adds named files from one static server.
+    """
+    splats: list[tuple[str, str]] = []
+
+    single_url = os.environ.get("MJSWAN_EXTRA_SPLAT_URL") or os.environ.get(
+        "MJSWAN_G1_SPLAT_URL"
+    )
+    if single_url:
+        splats.append(
+            (
+                os.environ.get(
+                    "MJSWAN_EXTRA_SPLAT_NAME", _splat_name_from_url(single_url)
+                ),
+                single_url,
+            )
+        )
+
+    for raw_url in os.environ.get("MJSWAN_EXTRA_SPLAT_URLS", "").split(","):
+        url = raw_url.strip()
+        if url:
+            splats.append((_splat_name_from_url(url), url))
+
+    base_url = os.environ.get("MJSWAN_EXTRA_SPLAT_BASE_URL")
+    names = os.environ.get("MJSWAN_EXTRA_SPLAT_FILES")
+    if base_url and names:
+        base = base_url.rstrip("/")
+        for raw_name in names.split(","):
+            filename = raw_name.strip()
+            if filename:
+                splats.append((_splat_name_from_url(filename), f"{base}/{filename}"))
+
+    seen: set[str] = set()
+    unique: list[tuple[str, str]] = []
+    for name, url in splats:
+        if url in seen:
+            continue
+        seen.add(url)
+        unique.append((name, url))
+    return unique
+
+
+def _add_g1_splats(g1_scene) -> None:
+    if not _env_bool("MJSWAN_DISABLE_STREET_SPLAT"):
+        g1_scene.add_splat(
+            name="Street",
+            source="assets/unitree_g1/street.spz",
+            scale=3.275,
+            z_offset=0.708,
+            yaw=40,
+            control=True,
+        )
+
+    if not _env_bool("MJSWAN_DISABLE_INDOOR_SPLAT"):
+        _splat_host = os.environ.get("MJSWAN_SPLAT_HOST", "192.168.3.38")
+        _splat_port = os.environ.get("MJSWAN_SPLAT_PORT", "8091")
+        g1_scene.add_splat(
+            name="Indoor",
+            url=f"http://{_splat_host}:{_splat_port}/splats/indoor_3dgs_compressed.ply",
+            scale=1.0,
+            x_offset=0.0,
+            y_offset=0.0,
+            z_offset=0.0,
+            control=True,
+        )
+
+    for name, url in _iter_env_splat_urls():
+        preset = _splat_transform_for_name(name)
+        print(f"[mjswan] Adding external G1 splat {name}: {url}")
+        g1_scene.add_splat(
+            name=name,
+            url=url,
+            scale=_env_float("MJSWAN_EXTRA_SPLAT_SCALE", preset["scale"]),
+            x_offset=_env_float("MJSWAN_EXTRA_SPLAT_X", preset["x"]),
+            y_offset=_env_float("MJSWAN_EXTRA_SPLAT_Y", preset["y"]),
+            z_offset=_env_float("MJSWAN_EXTRA_SPLAT_Z", preset["z"]),
+            roll=_env_float("MJSWAN_EXTRA_SPLAT_ROLL", 0.0),
+            pitch=_env_float("MJSWAN_EXTRA_SPLAT_PITCH", 0.0),
+            yaw=_env_float("MJSWAN_EXTRA_SPLAT_YAW", 0.0),
+            control=True,
+        )
+
+    g1_scene.add_splat_section()
+
+
 def _add_g1_scene(project) -> None:
     g1_scene = project.add_scene(
         spec=mujoco.MjSpec.from_file("assets/unitree_g1/scene.xml"),
@@ -200,14 +328,7 @@ def _add_g1_scene(project) -> None:
             body_name="torso_link",
         )
     )
-    g1_scene.add_splat(
-        name="Street",
-        source="assets/unitree_g1/street.spz",
-        scale=3.275,
-        z_offset=0.708,
-        yaw=40,
-        control=True,
-    )
+    _add_g1_splats(g1_scene)
 
     g1_actions = {
         "joint_pos": JointPositionActionCfg(
