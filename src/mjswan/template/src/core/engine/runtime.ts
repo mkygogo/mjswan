@@ -37,7 +37,7 @@ import { getCommandManager, type CommandTermContext, type CommandsConfig } from 
 import { EventManager } from '../event/EventManager';
 import { Events } from '../event/events';
 import type { TerrainData } from '../event/EventBase';
-import { MujocoFrameBridgeClient, type StereoFrameBridgeMeta } from './mujoco_frame_bridge';
+import { MujocoFrameBridgeClient, type StereoCameraPose, type StereoFrameBridgeMeta } from './mujoco_frame_bridge';
 
 type RuntimeOptions = {
   baseUrl?: string;
@@ -168,6 +168,11 @@ export class mjswanRuntime {
   private frameBridge: MujocoFrameBridgeClient | null;
   private stereoLookYaw: number;
   private stereoLookPitch: number;
+  private stereoMode: 'robot' | 'free';
+  private freeStereoPosition: THREE.Vector3;
+  private freeStereoYaw: number;
+  private freeStereoPitch: number;
+  private freeStereoRoll: number;
   private navState: 'idle' | 'moving' | 'arrived';
   private navArrivedUntil: number;
   private simStepCount: number;
@@ -281,6 +286,11 @@ export class mjswanRuntime {
     this.clickNavPointerDown = null;
     this.stereoLookYaw = 0;
     this.stereoLookPitch = 0;
+    this.stereoMode = 'free';
+    this.freeStereoPosition = mjcToThreeCoordinate([0.0, 0.0, 1.2]);
+    this.freeStereoYaw = Math.PI / 2;
+    this.freeStereoPitch = -0.16;
+    this.freeStereoRoll = 0;
     this.navState = 'idle';
     this.navArrivedUntil = 0;
     this.simStepCount = 0;
@@ -302,7 +312,12 @@ export class mjswanRuntime {
       onNavGoal: (x, y, z) => this.setNavigationTargetMjc(x, y, z),
       onNavCancel: () => this.cancelNavigation(),
       onCamLook: (yaw, pitch) => this.setStereoCameraLook(yaw, pitch),
+      onCamDrive: (forward, right, up, yaw, pitch, roll) => this.driveFreeStereoCamera(forward, right, up, yaw, pitch, roll),
+      onCamReset: () => this.resetFreeStereoCamera(),
+      onCamMode: (mode) => this.setStereoMode(mode),
       getCameraLook: () => ({ yaw: this.stereoLookYaw, pitch: this.stereoLookPitch }),
+      getStereoMode: () => this.stereoMode,
+      getFreeCameraPose: () => this.getFreeStereoCameraPose(),
     });
   }
 
@@ -1438,9 +1453,10 @@ export class mjswanRuntime {
     group.name = 'Virtual Stereo Camera';
     group.userData.ignoreClickNavigation = true;
     group.userData.ignoreDragForce = true;
+    group.userData.hideFromStereoCapture = true;
 
     const mount = new THREE.Mesh(
-      new THREE.BoxGeometry(0.024, 0.026, 0.135),
+      new THREE.BoxGeometry(0.135, 0.026, 0.024),
       new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.72, metalness: 0.18 })
     );
     mount.name = 'Stereo Camera Bar';
@@ -1448,13 +1464,13 @@ export class mjswanRuntime {
     const lensMaterial = new THREE.MeshStandardMaterial({ color: 0x020202, roughness: 0.42, metalness: 0.32 });
     const left = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.018, 0.026, 32), lensMaterial.clone());
     left.name = 'cam_left';
-    left.rotation.z = -Math.PI / 2;
-    left.position.set(0.02, 0, -0.050);
+    left.rotation.x = Math.PI / 2;
+    left.position.set(-0.050, 0, -0.020);
 
     const right = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.018, 0.026, 32), lensMaterial.clone());
     right.name = 'cam_right';
-    right.rotation.z = -Math.PI / 2;
-    right.position.set(0.02, 0, 0.050);
+    right.rotation.x = Math.PI / 2;
+    right.position.set(0.050, 0, -0.020);
 
     group.add(mount, left, right);
     this.scene.add(group);
@@ -1463,14 +1479,21 @@ export class mjswanRuntime {
   }
 
   private updateStereoCameraVisualization(): void {
-    const root = this.getStereoRootObject();
-    if (!root) {
-      if (this.stereoCameraViz) {
-        this.stereoCameraViz.group.visible = false;
-      }
+    const viz = this.ensureStereoCameraVisualization();
+
+    if (this.stereoMode === 'free') {
+      const pose = this.getFreeStereoCameraPose();
+      viz.group.visible = true;
+      viz.group.position.copy(pose.position);
+      viz.group.quaternion.copy(pose.quaternion);
       return;
     }
-    const viz = this.ensureStereoCameraVisualization();
+
+    const root = this.getStereoRootObject();
+    if (!root) {
+      viz.group.visible = false;
+      return;
+    }
     viz.group.visible = true;
 
     const rootPosition = new THREE.Vector3();
@@ -1485,6 +1508,67 @@ export class mjswanRuntime {
 
     viz.group.position.copy(mountWorld);
     viz.group.quaternion.setFromEuler(new THREE.Euler(0, -yaw, 0));
+  }
+
+
+  private setStereoMode(mode: 'robot' | 'free'): void {
+    this.stereoMode = mode;
+    console.info('[mjswan-frame] cam_mode accepted', { mode });
+  }
+
+  private resetFreeStereoCamera(): void {
+    this.freeStereoPosition.copy(mjcToThreeCoordinate([0.0, 0.0, 1.2]));
+    this.freeStereoYaw = Math.PI / 2;
+    this.freeStereoPitch = -0.16;
+    this.freeStereoRoll = 0;
+    this.stereoMode = 'free';
+    console.info('[mjswan-frame] free stereo camera reset');
+  }
+
+  private driveFreeStereoCamera(forward: number, right: number, up: number, yaw: number, pitch: number, roll: number): void {
+    this.stereoMode = 'free';
+    const maxStep = 0.35;
+    const df = Math.min(maxStep, Math.max(-maxStep, Number.isFinite(forward) ? forward : 0));
+    const dr = Math.min(maxStep, Math.max(-maxStep, Number.isFinite(right) ? right : 0));
+    const du = Math.min(maxStep, Math.max(-maxStep, Number.isFinite(up) ? up : 0));
+    this.freeStereoYaw = this.wrapAngle(this.freeStereoYaw + (Number.isFinite(yaw) ? yaw : 0));
+    this.freeStereoPitch = Math.min(1.35, Math.max(-1.35, this.freeStereoPitch + (Number.isFinite(pitch) ? pitch : 0)));
+    this.freeStereoRoll = this.wrapAngle(this.freeStereoRoll + (Number.isFinite(roll) ? roll : 0));
+
+    const basis = this.getFreeStereoBasis();
+    this.freeStereoPosition.addScaledVector(basis.forward, df);
+    this.freeStereoPosition.addScaledVector(basis.right, dr);
+    this.freeStereoPosition.addScaledVector(basis.up, du);
+  }
+
+  private getFreeStereoCameraPose(): StereoCameraPose {
+    const basis = this.getFreeStereoBasis();
+    const matrix = new THREE.Matrix4().makeBasis(basis.right, basis.up, basis.forward.clone().multiplyScalar(-1));
+    const quaternion = new THREE.Quaternion().setFromRotationMatrix(matrix);
+    if (this.freeStereoRoll !== 0) {
+      quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, -1), this.freeStereoRoll));
+    }
+    return { position: this.freeStereoPosition.clone(), quaternion };
+  }
+
+  private getFreeStereoBasis(): { forward: THREE.Vector3; right: THREE.Vector3; up: THREE.Vector3 } {
+    const pitch = this.freeStereoPitch;
+    const yaw = this.freeStereoYaw;
+    const forwardMjc = new THREE.Vector3(
+      Math.cos(pitch) * Math.cos(yaw),
+      Math.cos(pitch) * Math.sin(yaw),
+      Math.sin(pitch)
+    ).normalize();
+    const rightMjc = new THREE.Vector3(Math.sin(yaw), -Math.cos(yaw), 0).normalize();
+    const upMjc = new THREE.Vector3().crossVectors(rightMjc, forwardMjc).normalize();
+    const forward = mjcToThreeCoordinate([forwardMjc.x, forwardMjc.y, forwardMjc.z]).normalize();
+    const right = mjcToThreeCoordinate([rightMjc.x, rightMjc.y, rightMjc.z]).normalize();
+    const up = mjcToThreeCoordinate([upMjc.x, upMjc.y, upMjc.z]).normalize();
+    return { forward, right, up };
+  }
+
+  private wrapAngle(value: number): number {
+    return Math.atan2(Math.sin(value), Math.cos(value));
   }
 
   private setNavigationTargetMjc(x: number, y: number, z = 0): void {
@@ -1524,7 +1608,11 @@ export class mjswanRuntime {
   private setStereoCameraLook(yaw: number, pitch: number): void {
     this.stereoLookYaw = Math.min(Math.PI, Math.max(-Math.PI, yaw));
     this.stereoLookPitch = Math.min(0.8, Math.max(-0.8, pitch));
-    console.info('[mjswan-frame] cam_look accepted', { yaw: this.stereoLookYaw, pitch: this.stereoLookPitch });
+    if (this.stereoMode === 'free') {
+      this.freeStereoYaw = this.stereoLookYaw;
+      this.freeStereoPitch = Math.min(1.35, Math.max(-1.35, -0.16 + this.stereoLookPitch));
+    }
+    console.info('[mjswan-frame] cam_look accepted', { yaw: this.stereoLookYaw, pitch: this.stereoLookPitch, mode: this.stereoMode });
   }
 
   private getStereoRootObject(): THREE.Object3D | null {

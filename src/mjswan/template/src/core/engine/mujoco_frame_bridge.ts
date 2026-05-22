@@ -9,6 +9,28 @@ export type StereoFrameBridgeMeta = {
   yaw: number;
   nav_state: 'idle' | 'moving' | 'arrived';
   step: number;
+  pose_source?: 'robot' | 'free_camera';
+  camera_x?: number;
+  camera_y?: number;
+  camera_z?: number;
+  camera_qx?: number;
+  camera_qy?: number;
+  camera_qz?: number;
+  camera_qw?: number;
+  camera_forward_x?: number;
+  camera_forward_y?: number;
+  camera_forward_z?: number;
+  camera_right_x?: number;
+  camera_right_y?: number;
+  camera_right_z?: number;
+  camera_up_x?: number;
+  camera_up_y?: number;
+  camera_up_z?: number;
+};
+
+export type StereoCameraPose = {
+  position: THREE.Vector3;
+  quaternion: THREE.Quaternion;
 };
 
 export type StereoFrameBridgeRuntimeHooks = {
@@ -19,7 +41,12 @@ export type StereoFrameBridgeRuntimeHooks = {
   onNavGoal(x: number, y: number, z?: number): void;
   onNavCancel(): void;
   onCamLook(yaw: number, pitch: number): void;
+  onCamDrive(forward: number, right: number, up: number, yaw: number, pitch: number, roll: number): void;
+  onCamReset(): void;
+  onCamMode(mode: 'robot' | 'free'): void;
   getCameraLook(): { yaw: number; pitch: number };
+  getStereoMode(): 'robot' | 'free';
+  getFreeCameraPose(): StereoCameraPose;
 };
 
 type BridgeCommand = {
@@ -30,6 +57,11 @@ type BridgeCommand = {
   z?: number;
   yaw?: number;
   pitch?: number;
+  roll?: number;
+  forward?: number;
+  right?: number;
+  up?: number;
+  mode?: 'robot' | 'free';
 };
 
 const WIDTH = 1280;
@@ -37,8 +69,10 @@ const HEIGHT = 720;
 const FOVY = 46.8;
 const HALF_BASELINE = 0.060057;
 const MOUNT_POS = [0.02, 0.0, 0.57] as const;
-const DEFAULT_FPS = 8;
-const JPEG_QUALITY = 0.8;
+const DEFAULT_FPS = 24;
+const JPEG_QUALITY = 0.92;
+const JPEG_TIMEOUT_MS = 1500;
+const MAX_SOCKET_BUFFERED_BYTES = 16 * 1024 * 1024;
 
 function getBridgeUrl(): string | null {
   const params = new URLSearchParams(window.location.search);
@@ -62,6 +96,50 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
+function threePointToMjc(v: THREE.Vector3): [number, number, number] {
+  return [v.x, -v.z, v.y];
+}
+
+function threeDirectionToMjc(v: THREE.Vector3): [number, number, number] {
+  return [v.x, -v.z, v.y];
+}
+
+function enrichMetaWithCameraPose(meta: StereoFrameBridgeMeta, camera: THREE.PerspectiveCamera, poseSource: 'robot' | 'free_camera'): StereoFrameBridgeMeta {
+  camera.updateMatrixWorld(true);
+  const position = new THREE.Vector3();
+  camera.getWorldPosition(position);
+  const quaternion = new THREE.Quaternion();
+  camera.getWorldQuaternion(quaternion);
+  const forward = new THREE.Vector3();
+  camera.getWorldDirection(forward);
+  const right = new THREE.Vector3(1, 0, 0).applyQuaternion(quaternion).normalize();
+  const up = new THREE.Vector3(0, 1, 0).applyQuaternion(quaternion).normalize();
+  const [cameraX, cameraY, cameraZ] = threePointToMjc(position);
+  const [forwardX, forwardY, forwardZ] = threeDirectionToMjc(forward);
+  const [rightX, rightY, rightZ] = threeDirectionToMjc(right);
+  const [upX, upY, upZ] = threeDirectionToMjc(up);
+  return {
+    ...meta,
+    pose_source: poseSource,
+    camera_x: cameraX,
+    camera_y: cameraY,
+    camera_z: cameraZ,
+    camera_qx: quaternion.x,
+    camera_qy: quaternion.y,
+    camera_qz: quaternion.z,
+    camera_qw: quaternion.w,
+    camera_forward_x: forwardX,
+    camera_forward_y: forwardY,
+    camera_forward_z: forwardZ,
+    camera_right_x: rightX,
+    camera_right_y: rightY,
+    camera_right_z: rightZ,
+    camera_up_x: upX,
+    camera_up_y: upY,
+    camera_up_z: upZ,
+  };
+}
+
 export class MujocoFrameBridgeClient {
   private hooks: StereoFrameBridgeRuntimeHooks;
   private socket: WebSocket | null = null;
@@ -69,6 +147,7 @@ export class MujocoFrameBridgeClient {
   private captureTimer: number | null = null;
   private captureBusy = false;
   private seq = 0;
+  private lastHealthLogAt = 0;
   private readonly url: string | null;
   private readonly cameraLeft: THREE.PerspectiveCamera;
   private readonly cameraRight: THREE.PerspectiveCamera;
@@ -181,6 +260,19 @@ export class MujocoFrameBridgeClient {
       this.hooks.onNavCancel();
     } else if (cmd === 'cam_look') {
       this.hooks.onCamLook(Number(command.yaw ?? 0), Number(command.pitch ?? 0));
+    } else if (cmd === 'cam_drive') {
+      this.hooks.onCamDrive(
+        Number(command.forward ?? 0),
+        Number(command.right ?? 0),
+        Number(command.up ?? 0),
+        Number(command.yaw ?? 0),
+        Number(command.pitch ?? 0),
+        Number(command.roll ?? 0)
+      );
+    } else if (cmd === 'cam_reset') {
+      this.hooks.onCamReset();
+    } else if (cmd === 'cam_mode') {
+      this.hooks.onCamMode(command.mode === 'robot' ? 'robot' : 'free');
     }
   }
 
@@ -188,18 +280,22 @@ export class MujocoFrameBridgeClient {
     if (this.captureBusy || !this.socket || this.socket.readyState !== WebSocket.OPEN) {
       return;
     }
+    if (this.socket.bufferedAmount > MAX_SOCKET_BUFFERED_BYTES) {
+      const bufferedMb = (this.socket.bufferedAmount / (1024 * 1024)).toFixed(1);
+      console.warn(`[mjswan-frame] skipping stereo capture, websocket buffered=${bufferedMb} MB`);
+      return;
+    }
     const meta = this.hooks.getMeta();
     const root = this.hooks.getRootObject();
-    if (!meta || !root) {
+    if (!meta || (this.hooks.getStereoMode() === 'robot' && !root)) {
       return;
     }
     this.captureBusy = true;
     try {
-      this.updateStereoCameras(root);
-      const [left, right] = await Promise.all([
-        this.renderCameraToJpeg(this.cameraLeft),
-        this.renderCameraToJpeg(this.cameraRight),
-      ]);
+      const poseSource = this.updateStereoCameras(root);
+      const enrichedMeta = enrichMetaWithCameraPose(meta, this.cameraLeft, poseSource);
+      const left = await this.renderCameraToJpeg(this.cameraLeft);
+      const right = await this.renderCameraToJpeg(this.cameraRight);
       if (!left || !right || this.socket.readyState !== WebSocket.OPEN) {
         return;
       }
@@ -209,7 +305,7 @@ export class MujocoFrameBridgeClient {
         seq,
         left_size: left.byteLength,
         right_size: right.byteLength,
-        meta,
+        meta: enrichedMeta,
       }));
       const payload = new Uint8Array(4 + header.byteLength + left.byteLength + right.byteLength);
       new DataView(payload.buffer).setUint32(0, header.byteLength, true);
@@ -217,6 +313,14 @@ export class MujocoFrameBridgeClient {
       payload.set(left, 4 + header.byteLength);
       payload.set(right, 4 + header.byteLength + left.byteLength);
       this.socket.send(payload);
+      const now = performance.now();
+      if (now - this.lastHealthLogAt >= 5000) {
+        this.lastHealthLogAt = now;
+        const leftKb = (left.byteLength / 1024).toFixed(0);
+        const rightKb = (right.byteLength / 1024).toFixed(0);
+        const bufferedKb = (this.socket.bufferedAmount / 1024).toFixed(0);
+        console.info(`[mjswan-frame] sent stereo seq=${seq} source=${poseSource} left=${leftKb}KB right=${rightKb}KB buffered=${bufferedKb}KB`);
+      }
     } catch (error) {
       console.warn('[mjswan-frame] stereo capture failed:', error);
     } finally {
@@ -224,15 +328,32 @@ export class MujocoFrameBridgeClient {
     }
   }
 
-  private updateStereoCameras(root: THREE.Object3D): void {
+  private updateStereoCameras(root: THREE.Object3D | null): 'robot' | 'free_camera' {
+    const leftOffset = mjcToThreeCoordinate([0, HALF_BASELINE, 0]);
+    const rightOffset = mjcToThreeCoordinate([0, -HALF_BASELINE, 0]);
+
+    if (this.hooks.getStereoMode() === 'free') {
+      const pose = this.hooks.getFreeCameraPose();
+      // Baseline is along camera's local X axis (right direction)
+      const cameraRight = new THREE.Vector3(1, 0, 0).applyQuaternion(pose.quaternion);
+      this.cameraLeft.position.copy(pose.position.clone().addScaledVector(cameraRight, -HALF_BASELINE));
+      this.cameraRight.position.copy(pose.position.clone().addScaledVector(cameraRight, HALF_BASELINE));
+      this.cameraLeft.quaternion.copy(pose.quaternion);
+      this.cameraRight.quaternion.copy(pose.quaternion);
+      this.cameraLeft.updateMatrixWorld(true);
+      this.cameraRight.updateMatrixWorld(true);
+      return 'free_camera';
+    }
+
+    if (!root) {
+      return 'robot';
+    }
     const rootPosition = new THREE.Vector3();
     const rootQuaternion = new THREE.Quaternion();
     root.getWorldPosition(rootPosition);
     root.getWorldQuaternion(rootQuaternion);
 
     const mount = mjcToThreeCoordinate(MOUNT_POS);
-    const leftOffset = mjcToThreeCoordinate([0, HALF_BASELINE, 0]);
-    const rightOffset = mjcToThreeCoordinate([0, -HALF_BASELINE, 0]);
     const look = this.hooks.getCameraLook();
     const yaw = clamp(look.yaw, -Math.PI, Math.PI);
     const pitch = clamp(-0.16 + look.pitch, -1.0, 0.8);
@@ -245,6 +366,7 @@ export class MujocoFrameBridgeClient {
 
     this.placeCamera(this.cameraLeft, rootPosition, rootQuaternion, mount.clone().add(leftOffset), localForward, localUp);
     this.placeCamera(this.cameraRight, rootPosition, rootQuaternion, mount.clone().add(rightOffset), localForward, localUp);
+    return 'robot';
   }
 
   private placeCamera(
@@ -268,12 +390,25 @@ export class MujocoFrameBridgeClient {
     const renderer = this.hooks.renderer;
     const oldTarget = renderer.getRenderTarget();
     const oldXr = renderer.xr.enabled;
+    const hiddenObjects: Array<{ object: THREE.Object3D; visible: boolean }> = [];
+    this.hooks.scene.traverse((object) => {
+      if (object.userData.hideFromStereoCapture) {
+        hiddenObjects.push({ object, visible: object.visible });
+        object.visible = false;
+      }
+    });
     renderer.xr.enabled = false;
-    renderer.setRenderTarget(this.renderTarget);
-    renderer.render(this.hooks.scene, camera);
-    renderer.readRenderTargetPixels(this.renderTarget, 0, 0, WIDTH, HEIGHT, this.pixels);
-    renderer.setRenderTarget(oldTarget);
-    renderer.xr.enabled = oldXr;
+    try {
+      renderer.setRenderTarget(this.renderTarget);
+      renderer.render(this.hooks.scene, camera);
+      renderer.readRenderTargetPixels(this.renderTarget, 0, 0, WIDTH, HEIGHT, this.pixels);
+    } finally {
+      renderer.setRenderTarget(oldTarget);
+      renderer.xr.enabled = oldXr;
+      for (const { object, visible } of hiddenObjects) {
+        object.visible = visible;
+      }
+    }
 
     const rowSize = WIDTH * 4;
     for (let y = 0; y < HEIGHT; y++) {
@@ -282,7 +417,21 @@ export class MujocoFrameBridgeClient {
       this.rgba.set(this.pixels.subarray(src, src + rowSize), dst);
     }
     this.ctx.putImageData(new ImageData(this.rgba, WIDTH, HEIGHT), 0, 0);
-    const blob = await new Promise<Blob | null>((resolve) => this.canvas.toBlob(resolve, 'image/jpeg', JPEG_QUALITY));
+    const blob = await new Promise<Blob | null>((resolve) => {
+      let settled = false;
+      const timer = window.setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        console.warn('[mjswan-frame] JPEG encode timed out');
+        resolve(null);
+      }, JPEG_TIMEOUT_MS);
+      this.canvas.toBlob((value) => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timer);
+        resolve(value);
+      }, 'image/jpeg', JPEG_QUALITY);
+    });
     if (!blob) {
       return null;
     }

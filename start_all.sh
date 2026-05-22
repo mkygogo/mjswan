@@ -150,7 +150,7 @@ start_scene_relay() {
 start_spatial_ui() {
   log "启动 StereoSpatial UI (端口 $UI_PORT)..."
   cd "$SPATIAL_DIR"
-  npx vite --host 0.0.0.0 --port "$UI_PORT" \
+  SPATIALCANVAS_DEV_HTTP=1 npx vite --host 0.0.0.0 --port "$UI_PORT" \
     > /tmp/mjswan_spatial_ui.log 2>&1 &
   save_pid "spatial_ui" $!
   log "  StereoSpatial UI PID=$! → http://${LAN_IP}:${UI_PORT}"

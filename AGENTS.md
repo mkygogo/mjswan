@@ -40,8 +40,11 @@ When `FRAME_PORT` or `MJSWAN_FRAME_PORT` is set, `mjswanApp.launch()` starts `sr
 - TCP server: `FRAME_PORT` (normally `9876`) for FFS `--camera mujoco`.
 - Browser WebSocket: `FRAME_WS_PORT` (default `FRAME_PORT + 1`, normally `9877`).
 - Server-to-FFS frame protocol: little-endian `<III` header followed by left JPEG, right JPEG, and meta JSON.
-- FFS-to-server commands: newline-delimited JSON (`nav_goal`, `nav_cancel`, `cam_look`).
+- FFS-to-server commands: newline-delimited JSON (`nav_goal`, `nav_cancel`, `cam_look`, `cam_drive`, `cam_reset`, `cam_mode`).
 - The browser runtime renders stereo JPEG frames and streams them to the bridge; the bridge forwards FFS commands back to the browser runtime.
+- Frame delivery uses seq-based event-driven waiting (`_wait_for_new_frame(last_seq)`) instead of fixed sleep, minimizing latency.
+- Seq comparison uses `!=` (not `>`) so that browser page refreshes (which reset seq to 0) are handled correctly without stalling the TCP stream.
+- All TCP commands from FFS are broadcast generically to browser clients (no per-command routing needed in Python).
 
 Typical run command:
 
@@ -63,8 +66,60 @@ Current G1 defaults:
 - logical views: `cam_left` / `cam_right`
 - mount: top/head area, currently `MOUNT_POS = [0.02, 0.0, 0.57]` in MuJoCo coordinates
 - `cam_look.yaw` is full 360 degrees (`[-pi, pi]`); pitch remains clamped to the prior safe range
+- frame rate: `DEFAULT_FPS = 24`, JPEG quality: `0.92`
+- stereo baseline axis: uses camera local X (right) via `new THREE.Vector3(1,0,0).applyQuaternion(pose.quaternion)` to ensure correct horizontal separation regardless of camera orientation
 
 The visible rig is intentionally simple: a small horizontal black bar with two black cylindrical lenses. It should remain level for visual inspection unless the user explicitly asks for head-attached pitch/roll visualization.
+
+### Free camera mode (camera-robot decoupling)
+
+The stereo camera has two modes controlled by `stereoMode`: `'robot'` (mounted on robot body) and `'free'` (independent 6DOF movement).
+
+In free mode (`stereoMode === 'free'`):
+- Camera state: `freeStereoPosition`, `freeStereoYaw`, `freeStereoPitch`, `freeStereoRoll`
+- Default start position: `[0.0, 0.0, 1.2]` in MuJoCo coordinates (1.2m height)
+- Default yaw: `Math.PI / 2` (looking MuJoCo +Y = Three.js -Z, matches RobotControlApp FPS default)
+- `cam_drive` command moves camera by local-frame increments (forward/right/up/yaw/pitch/roll), clamped to 0.35m/step
+- `cam_reset` resets free camera to default position and yaw=π/2
+- `cam_mode` switches between `'robot'` and `'free'`
+- `cam_look` in free mode directly sets `freeStereoYaw` / `freeStereoPitch`
+- `getFreeStereoBasis()` computes MuJoCo forward/right/up vectors from yaw+pitch, converted to Three.js
+- `getFreeStereoCameraPose()` returns `{ position, quaternion }` for stereo rig placement
+
+Both modes output `enrichMetaWithCameraPose()` into the frame meta: full camera world position + quaternion + forward/right/up direction vectors (all in MuJoCo coordinates). The `pose_source` field indicates which mode generated the frame.
+
+### Coordinate systems
+
+MuJoCo world frame: X forward, Y left, Z up.
+Three.js scene frame: X right, Y up, Z backward.
+
+Conversion (`src/mjswan/template/src/core/scene/coordinate.ts`):
+
+```
+mjcToThreeCoordinate: three_x = mjc_x, three_y = mjc_z, three_z = -mjc_y
+threeToMjcCoordinate: mjc_x = three_x, mjc_y = -three_z, mjc_z = three_y
+```
+
+### Frame bridge meta
+
+`getFrameBridgeMeta()` in `runtime.ts` returns the base meta:
+
+```json
+{ "x": qpos[0], "y": qpos[1], "z": qpos[2], "yaw": getRootYaw(), "nav_state": "...", "step": N }
+```
+
+`enrichMetaWithCameraPose()` extends this with camera world pose:
+
+```json
+{
+  "pose_source": "robot" | "free_camera",
+  "camera_x", "camera_y", "camera_z",
+  "camera_qx", "camera_qy", "camera_qz", "camera_qw",
+  "camera_forward_x/y/z", "camera_right_x/y/z", "camera_up_x/y/z"
+}
+```
+
+All camera vectors are in MuJoCo world coordinates (converted from Three.js via `threePointToMjc` / `threeDirectionToMjc`). FFS uses the forward/right/up vectors to build the rotation matrix for world-coordinate point cloud transform.
 
 ### Control flow
 
@@ -73,10 +128,10 @@ The minimal closed loop is:
 1. mjswan browser renders left/right virtual camera JPEGs.
 2. `frame_bridge.py` exposes them to FFS over TCP `9876`.
 3. FFS computes point clouds and publishes them to StereoSpatial scene relay.
-4. StereoSpatial RobotControl sends `nav_goal`, `nav_cancel`, `cam_look`, and `refresh_scene` through the relay.
+4. StereoSpatial RobotControl sends `nav_goal`, `nav_cancel`, `cam_look`, `cam_drive`, `cam_reset`, `cam_mode`, and `refresh_scene` through the relay.
 5. FFS forwards navigation/camera commands to `camera_mujoco.py`.
 6. `camera_mujoco.py` writes newline JSON commands to mjswan `frame_bridge.py`.
-7. mjswan browser runtime applies velocity commands through the existing `velocity:lin_vel_x`, `velocity:lin_vel_y`, `velocity:ang_vel_z` command terms.
+7. mjswan browser runtime applies velocity commands (nav) or drives the free stereo camera (cam_drive).
 
 Keep this FFS-mediated control path for the minimal integration. A future optimization may connect StereoSpatial directly to a mjswan control WebSocket, but do not mix that into small fixes.
 

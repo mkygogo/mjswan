@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import select
 import socket
 import struct
 import threading
@@ -62,6 +63,8 @@ class MujocoFrameBridge:
         self._ws_thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._ws_clients: set[WebSocketServerProtocol] = set()
+        self._frames_since_log = 0
+        self._last_frame_log_at = time.time()
 
     def start(self) -> None:
         if websockets is None:
@@ -167,6 +170,19 @@ class MujocoFrameBridge:
         with self._condition:
             self._latest = frame
             self._condition.notify_all()
+        self._frames_since_log += 1
+        now = time.time()
+        elapsed = now - self._last_frame_log_at
+        if elapsed >= 5.0:
+            fps = self._frames_since_log / elapsed
+            pose_source = meta.get("pose_source") or "unknown"
+            print(
+                f"[mjswan-frame] browser stereo frames: {fps:.1f} fps "
+                f"seq={seq} source={pose_source} left={len(left) // 1024}KB right={len(right) // 1024}KB",
+                flush=True,
+            )
+            self._frames_since_log = 0
+            self._last_frame_log_at = now
 
     def _run_tcp_server(self) -> None:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
@@ -181,18 +197,29 @@ class MujocoFrameBridge:
                     continue
                 print(f"[mjswan-frame] FFS connected from {addr[0]}:{addr[1]}")
                 with conn:
-                    conn.settimeout(0.01)
+                    conn.settimeout(2.0)
                     self._serve_tcp_client(conn)
                 print("[mjswan-frame] FFS disconnected")
 
     def _serve_tcp_client(self, conn: socket.socket) -> None:
         command_buffer = b""
+        last_seq = -1
+        last_wait_log_at = 0.0
         while not self._stop.is_set():
-            frame = self._wait_for_frame(timeout=0.05)
+            frame = self._wait_for_new_frame(last_seq, timeout=0.1)
             try:
                 if frame is None:
+                    now = time.time()
+                    if now - last_wait_log_at >= 5.0:
+                        if self._latest is None:
+                            detail = "no browser frame received yet"
+                        else:
+                            detail = f"latest seq={self._latest.seq} age={now - self._latest.created_at:.1f}s"
+                        print(f"[mjswan-frame] waiting for new stereo frame ({detail})", flush=True)
+                        last_wait_log_at = now
                     command_buffer = self._drain_tcp_commands(conn, command_buffer)
                     continue
+                last_seq = frame.seq
                 packet = struct.pack("<III", len(frame.left), len(frame.right), len(frame.meta))
                 conn.sendall(packet)
                 conn.sendall(frame.left)
@@ -201,13 +228,12 @@ class MujocoFrameBridge:
                 command_buffer = self._drain_tcp_commands(conn, command_buffer)
             except (ConnectionError, OSError):
                 break
-            time.sleep(0.08)
 
-    def _wait_for_frame(self, timeout: float) -> StereoFrame | None:
+    def _wait_for_new_frame(self, last_seq: int, timeout: float) -> StereoFrame | None:
         deadline = time.monotonic() + timeout
         with self._condition:
             while not self._stop.is_set():
-                if self._latest is not None:
+                if self._latest is not None and self._latest.seq != last_seq:
                     return self._latest
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -217,14 +243,15 @@ class MujocoFrameBridge:
 
     def _drain_tcp_commands(self, conn: socket.socket, buffer: bytes) -> bytes:
         while True:
+            readable, _, _ = select.select([conn], [], [], 0)
+            if not readable:
+                break
             try:
                 chunk = conn.recv(4096)
-            except BlockingIOError:
+            except (BlockingIOError, socket.timeout):
                 break
-            except socket.timeout:
-                break
-            except OSError:
-                break
+            except OSError as exc:
+                raise ConnectionError("TCP command socket error") from exc
             if not chunk:
                 raise ConnectionError("TCP client disconnected")
             buffer += chunk
